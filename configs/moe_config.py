@@ -84,3 +84,36 @@ class GPU24GBMoEModelConfig(MoEModelConfig):
     
     def __post_init__(self):
         super().__post_init__()
+
+
+@dataclass
+class DebugMoEConfig(MoEModelConfig):
+    # Tiny architecture for fast debugging on any hardware
+    d_model: int = 128
+    n_heads: int = 4
+    n_layers: int = 2
+    d_ff: int = 512
+    
+    # MoE settings
+    num_experts: int = 4
+    expert_top_k: int = 2
+    
+    # Batch size
+    batch_size: int = 2
+    gradient_accumulation_steps: int = 1
+
+    # Training parameters
+    muon_lr: float = 0.01
+    adamw_lr: float = 0.001
+    
+    # Data
+    max_seq_len: int = 128
+    num_documents: int = 100
+    
+    # Reduced logging
+    log_milestones: Tuple[int, ...] = (10, 50, 80)
+    max_steps: int = 100
+    eval_every: int = 10
+    
+    def __post_init__(self):
+        super().__post_init__()

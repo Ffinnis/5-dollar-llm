@@ -68,6 +68,10 @@ instance/
 .webassets-cache
 
 hf_cache/
+hf_cache_debug/
+
+checkpoints/metrics_plot.png
+checkpoints/debug_run/metrics_plot.png
 
 # Scrapy stuff:
 .scrapy

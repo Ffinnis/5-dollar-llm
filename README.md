@@ -7,8 +7,20 @@
 ```bash
 pip install -r requirements.txt
 
+
 python train_moe.py
 ```
+
+## Debugging
+
+To run a quick debug session with a tiny model (useful for verifying the training loop or checking for errors on any hardware):
+
+```bash
+python debug_moe.py
+```
+
+This uses a `DebugMoEConfig` with a very small model size and runs for only 100 steps.
+
 
 ## Hyperparameter Tuning
 
@@ -29,6 +41,7 @@ You can then apply the best learning rate in `configs/moe_config.py`.
 ## Getting Started
 
 1. **Fork this repository** - Click the "Fork" button at the top right of this page to create your own copy
+    > **Note**: If you cannot fork the repository (e.g., because you already have a fork), you can clone it locally, create a new empty repository on GitHub, and push the code there. You may ask ChatGPT for help.
 2. Clone your fork: `git clone URL_HERE`
 3. Install dependencies: `pip install -r requirements.txt`
 4. Read `CONTRIBUTING.md` for contribution guidelines
