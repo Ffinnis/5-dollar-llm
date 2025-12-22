@@ -19,6 +19,50 @@ class Rotary(nn.Module):
         return self.rope(x_BTHD)
 
 
+class LightningIndexer(nn.Module):
+    def __init__(self, d_model: int, n_index_heads: int, index_dim: int):
+        super().__init__()
+        self.n_index_heads = n_index_heads
+        self.index_dim = index_dim
+
+        # Query-side projections
+        self.q_proj = nn.Linear(d_model, n_index_heads * index_dim, bias=False)
+        self.w_proj = nn.Linear(d_model, n_index_heads, bias=False)
+
+        # Key-side projection
+        self.k_proj = nn.Linear(d_model, index_dim, bias=False)
+
+    def forward(self, x_q: torch.Tensor, x_k: torch.Tensor):
+        B, T_q, _ = x_q.size()
+        _, T_k, _ = x_k.size()
+
+        # q_I: [B, T_q, H_I, D_I]
+        q_I = self.q_proj(x_q).view(B, T_q, self.n_index_heads, self.index_dim)
+        
+        # w_I: [B, T_q, H_I]
+        w_I = self.w_proj(x_q)
+
+        # k_I: [B, T_k, D_I]
+        k_I = self.k_proj(x_k).view(B, T_k, 1, self.index_dim)
+
+        # Compute term: ReLU( q_t,j . k_s )
+        # [B, H_I, T_q, D_I]
+        q_poly = q_I.permute(0, 2, 1, 3) 
+        # [B, 1, D_I, T_k]
+        k_poly = k_I.view(B, T_k, self.index_dim).permute(0, 2, 1).unsqueeze(1) 
+        
+        # [B, H_I, T_q, T_k]
+        dot = torch.matmul(q_poly, k_poly)
+        activated = F.relu(dot)
+
+        # w_I: [B, H_I, T_q, 1]
+        w_poly = w_I.permute(0, 2, 1).unsqueeze(-1)
+        
+        # Weighted sum across heads -> [B, T_q, T_k]
+        index_scores = (activated * w_poly).sum(dim=1)
+        return index_scores
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(
         self,
@@ -27,6 +71,11 @@ class MultiHeadAttention(nn.Module):
         max_seq_len: int,
         dropout: float = 0.1,
         n_kv_heads: int | None = None,
+        # DSA Config
+        use_dsa: bool = False,
+        dsa_n_index_heads: int = 4,
+        dsa_index_dim: int = 64,
+        dsa_top_k: int = 32,
     ):
         super().__init__()
         self.d_model = d_model
@@ -34,6 +83,12 @@ class MultiHeadAttention(nn.Module):
         self.n_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
         self.num_key_value_groups = self.n_heads // self.n_kv_heads
         self.d_k = d_model // n_heads
+        
+        # DSA
+        self.use_dsa = use_dsa
+        self.dsa_top_k = dsa_top_k
+        if use_dsa:
+            self.indexer = LightningIndexer(d_model, dsa_n_index_heads, dsa_index_dim)
 
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.k_proj = nn.Linear(d_model, self.n_kv_heads * self.d_k, bias=False)
@@ -69,8 +124,65 @@ class MultiHeadAttention(nn.Module):
 
         Q, K, V = Q.transpose(1, 2), K.transpose(1, 2), V.transpose(1, 2)
 
+        attn_mask = None
+        if self.use_dsa:
+            # Calculate index scores: [B, T, T]
+            index_scores = self.indexer(x, x)
+            # Create mask based on Top-K
+            # We want to keep positions in top-k.
+            # Warning: for causal attention, we must also respect causality.
+            # But the indexer is trained to select useful past tokens.
+            # The causal mask is usually handled by scaled_dot_product_attention's is_causal=True.
+            # If we pass an attn_mask, is_causal must be False in some versions or combined.
+            # For simplicity, let's construct a boolean mask: False (ignored) for non-top-k.
+            
+            # topk returns values, indices. We verify against the k-th value.
+            # However, for variable sequence lengths in a batch, and causal masking...
+            # The easiest way to combine is:
+            # 1. Get causal mask (handled by function if is_causal=True).
+            # 2. Get DSA mask.
+            # 3. Combine.
+            # But scaled_dot_product_attention with is_causal=True AND attn_mask is supported.
+            # Mask shape: [B, T, T] or broadcastable.
+            
+            # Select top-k references for each query.
+            # index_scores: [B, T, T]
+            # Since indexer should only attend to past? The formula suggests "preceding token h_s".
+            # So we should mask future tokens in index_scores before top-k?
+            # Or reliance on causal mask later?
+            # If we pick top-k from *all* tokens, we might pick future ones which will be masked by causality anyway.
+            # Ideally we mask future in index_scores first.
+            causal_mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
+            index_scores = index_scores.masked_fill(~causal_mask, float('-inf'))
+            
+            # Now top-k across the last dim (keys)
+            # If seq_len < top_k, we take all.
+            k_val = min(self.dsa_top_k, seq_len)
+            top_scores, _ = torch.topk(index_scores, k_val, dim=-1)
+            
+            # Threshold is the k-th score
+            threshold = top_scores[:, :, -1].unsqueeze(-1) # [B, T, 1]
+            dsa_mask = (index_scores >= threshold) & causal_mask # [B, T, T]
+            
+            # Convert to float mask for attention (0.0 for keep, -inf for mask)?? 
+            # Or bool: True for keep?
+            # F.scaled_dot_product_attention expects:
+            # "attn_mask – boolean mask where True indicates elements that ... are NOT ignored" (PyTorch > 2.0?)
+            # Wait, docs say: 
+            # "If a boolean mask is provided, elements with True are not ignored."
+            # "If a float mask is provided, it is added to the attention weight."
+            # We will use boolean.
+            
+            # We must ensure we broadcast over heads.
+            # Mask shape [B, 1, T, T] or [B, T, T] is fine.
+            attn_mask = dsa_mask.unsqueeze(1) # [B, 1, T, T]
+            
         attn_output = F.scaled_dot_product_attention(
-            Q, K, V, is_causal=True, dropout_p=self.dropout if self.training else 0.0
+            Q, K, V, 
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True if attn_mask is None else False 
+            # If we provide a mask that already includes causality (which we did), we set is_causal=False.
         )
         attn_output = attn_output.transpose(1, 2).reshape(
             batch_size, seq_len, self.d_model
@@ -90,10 +202,21 @@ class TransformerBlock(nn.Module):
         max_seq_len: int,
         dropout: float = 0.1,
         n_kv_heads: int | None = None,
+        # DSA Config
+        use_dsa: bool = False,
+        dsa_n_index_heads: int = 4,
+        dsa_index_dim: int = 64,
+        dsa_top_k: int = 32,
     ):
         super().__init__()
 
-        self.attention = MultiHeadAttention(d_model, n_heads, max_seq_len, dropout, n_kv_heads)
+        self.attention = MultiHeadAttention(
+            d_model, n_heads, max_seq_len, dropout, n_kv_heads,
+            use_dsa=use_dsa,
+            dsa_n_index_heads=dsa_n_index_heads,
+            dsa_index_dim=dsa_index_dim,
+            dsa_top_k=dsa_top_k
+        )
         self.feed_forward = SwiGLUFeedForward(d_model, d_ff, dropout)
 
         # Normalization layers

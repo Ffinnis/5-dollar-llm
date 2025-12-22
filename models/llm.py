@@ -27,6 +27,10 @@ class MinimalLLM(nn.Module):
                     config.max_seq_len,
                     config.dropout,
                     n_kv_heads=config.n_kv_heads,
+                    use_dsa=config.use_dsa,
+                    dsa_n_index_heads=config.dsa_n_index_heads,
+                    dsa_index_dim=config.dsa_index_dim,
+                    dsa_top_k=config.dsa_top_k,
                 )
                 for i in range(config.n_layers)
             ]

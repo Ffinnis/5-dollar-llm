@@ -12,6 +12,12 @@ class BlueberryConfig:
     
     # GQA parameters
     n_kv_heads: int = 4      
+
+    # DeepSeek Sparse Attention (DSA)
+    use_dsa: bool = False
+    dsa_n_index_heads: int = 4
+    dsa_index_dim: int = 64
+    dsa_top_k: int = 32
     
     # Data params
     max_seq_len: int = 2048  
