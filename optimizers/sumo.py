@@ -6,7 +6,7 @@ Accelerating Memory-Efficient LLM Training"
 
 Key features:
 - Exact SVD-based orthogonalization (instead of Newton-Schulz approximation)
-- Low-rank subspace optimization for memory efficiency
+- Low-rank subspace optimization for memory efficiency  
 - Norm-growth limiter for stability
 - Perpendicular gradient term for better convergence
 """
@@ -16,13 +16,11 @@ import torch.nn.functional as F
 from typing import Optional
 
 
-def randomized_svd(A: torch.Tensor, rank: int, n_oversamples: int = 10, n_iter: int = 2) -> torch.Tensor:
+def randomized_svd(A: torch.Tensor, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> torch.Tensor:
     """
     Randomized SVD to efficiently compute top-r left singular vectors.
     
     Returns Q: orthonormal basis for the column space of A (m x r).
-    
-    Complexity: O(mnr + mr²) instead of O(min(mn², m²n)) for full SVD.
     """
     m, n = A.shape
     r = min(rank + n_oversamples, min(m, n))
@@ -38,20 +36,17 @@ def randomized_svd(A: torch.Tensor, rank: int, n_oversamples: int = 10, n_iter: 
     # QR decomposition to get orthonormal basis
     Q, _ = torch.linalg.qr(Y)
     
-    # Truncate to desired rank
     return Q[:, :rank]
 
 
 def orth_svd(M: torch.Tensor) -> torch.Tensor:
     """
     Exact orthogonalization via SVD.
-    
     Returns U @ V^T where M = U @ Σ @ V^T
-    
-    This is the closest orthogonal matrix to M in Frobenius norm:
-    argmin_{O: O^T O = I} ||O - M||_F
     """
-    U, S, Vt = torch.linalg.svd(M, full_matrices=False)
+    # Normalize like Newton-Schulz does
+    M_norm = M / (M.norm() + 1e-7)
+    U, S, Vt = torch.linalg.svd(M_norm, full_matrices=False)
     return U @ Vt
 
 
@@ -59,13 +54,11 @@ class SUMO(torch.optim.Optimizer):
     """
     SUMO: Subspace-Aware Moment-Orthogonalization Optimizer
     
-    Performs exact SVD-based orthogonalization of the first-order moment
-    within a dynamically adapted low-rank subspace.
-    
     Args:
         params: Iterable of parameters to optimize
         lr: Learning rate (default: 0.02)
         momentum: Momentum coefficient β (default: 0.95)
+        nesterov: Use Nesterov momentum (default: True)
         rank: Low-rank subspace dimension r (default: 16)
         subspace_update_freq: How often to update subspace Q (default: 200)
         perp_grad_scale: Scale for perpendicular gradient term α (default: 0.1)
@@ -77,6 +70,7 @@ class SUMO(torch.optim.Optimizer):
         params,
         lr: float = 0.02,
         momentum: float = 0.95,
+        nesterov: bool = True,
         rank: int = 16,
         subspace_update_freq: int = 200,
         perp_grad_scale: float = 0.1,
@@ -85,6 +79,7 @@ class SUMO(torch.optim.Optimizer):
         defaults = dict(
             lr=lr,
             momentum=momentum,
+            nesterov=nesterov,
             rank=rank,
             subspace_update_freq=subspace_update_freq,
             perp_grad_scale=perp_grad_scale,
@@ -103,6 +98,7 @@ class SUMO(torch.optim.Optimizer):
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
+            nesterov = group['nesterov']
             rank = group['rank']
             K = group['subspace_update_freq']
             alpha = group['perp_grad_scale']
@@ -116,13 +112,14 @@ class SUMO(torch.optim.Optimizer):
                 
                 # Only apply SUMO to 2D parameters (weight matrices)
                 if grad.ndim != 2:
-                    # Fallback to simple momentum SGD for non-2D params
+                    # Fallback to Muon-style momentum for non-2D params
                     state = self.state[p]
                     if 'momentum_buffer' not in state:
                         state['momentum_buffer'] = torch.zeros_like(grad)
                     buf = state['momentum_buffer']
                     buf.lerp_(grad, 1 - momentum)
-                    p.add_(buf, alpha=-lr)
+                    g = grad.lerp_(buf, momentum) if nesterov else buf
+                    p.add_(g, alpha=-lr)
                     continue
                 
                 m, n = grad.shape
@@ -133,10 +130,18 @@ class SUMO(torch.optim.Optimizer):
                     state['step'] = 0
                     state['Q'] = None  # Left subspace basis (m x r)
                     state['M_hat'] = None  # Low-rank moment (r x n)
-                    state['prev_O_norm'] = None  # For norm-growth limiter
+                    state['momentum_buffer'] = torch.zeros_like(grad)  # For Nesterov
+                    state['prev_O_norm'] = None
                 
                 state['step'] += 1
                 step = state['step']
+                
+                # ============================================
+                # Nesterov momentum (same as Muon)
+                # ============================================
+                buf = state['momentum_buffer']
+                buf.lerp_(grad, 1 - momentum)
+                g = grad.lerp_(buf, momentum) if nesterov else buf
                 
                 # Ensure rank doesn't exceed matrix dimensions
                 effective_rank = min(rank, m, n)
@@ -145,13 +150,12 @@ class SUMO(torch.optim.Optimizer):
                 # Block 1: Adaptive Subspace Selection
                 # ============================================
                 if step % K == 1 or state['Q'] is None:
-                    # Compute new subspace via randomized SVD
-                    Q_new = randomized_svd(grad, effective_rank)
+                    Q_new = randomized_svd(g, effective_rank)
                     
                     # Block 1.1: Transform moment to new subspace
                     if state['M_hat'] is not None and state['Q'] is not None:
-                        # M_hat_new = Q_new^T @ Q_old @ M_hat_old
                         Q_old = state['Q']
+                        # Transform: M_hat_new = Q_new^T @ Q_old @ M_hat_old  
                         state['M_hat'] = Q_new.T @ Q_old @ state['M_hat']
                     
                     state['Q'] = Q_new
@@ -161,21 +165,21 @@ class SUMO(torch.optim.Optimizer):
                 # ============================================
                 # Project gradient to low-rank subspace
                 # ============================================
-                G_hat = Q.T @ grad  # r x n
+                G_hat = Q.T @ g  # r x n
                 
                 # ============================================
-                # Block 2: Low-Rank Steepest Descent Optimization
+                # Block 2: Low-Rank Moment Update + Orthogonalization
                 # ============================================
-                # Update moment with momentum
                 if state['M_hat'] is None:
                     state['M_hat'] = G_hat.clone()
                 else:
+                    # EMA update in subspace
                     state['M_hat'].lerp_(G_hat, 1 - momentum)
                 
                 M_hat = state['M_hat']
                 
-                # Exact orthogonalization via SVD
-                O = orth_svd(M_hat)  # r x n, orthogonal rows
+                # Exact orthogonalization via SVD (with normalization like NS5)
+                O = orth_svd(M_hat)  # r x n
                 
                 # ============================================
                 # Block 3: Norm-Growth Limiter
@@ -188,18 +192,18 @@ class SUMO(torch.optim.Optimizer):
                 state['prev_O_norm'] = O_norm
                 
                 # ============================================
-                # Block 4: Update Step in Original Space
+                # Block 4: Update in Original Space
                 # ============================================
-                # Project back to original space
-                update = Q @ O  # m x n
+                # Project back: Q @ O gives m x n
+                update = Q @ O
                 
-                # Add perpendicular gradient term (if nonzero scale)
+                # Add perpendicular gradient term
                 if alpha > 0:
-                    G_proj = Q @ G_hat  # Projected part
-                    G_perp = grad - G_proj  # Perpendicular part
+                    G_proj = Q @ G_hat
+                    G_perp = g - G_proj
                     update = update + alpha * G_perp
                 
-                # Scale update like Muon does
+                # Scale like Muon
                 scale = max(1, m / n) ** 0.5
                 p.add_(update, alpha=-lr * scale)
         
