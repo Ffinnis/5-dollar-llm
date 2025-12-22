@@ -13,6 +13,7 @@ from typing import List, Optional, Callable, Dict, Any
 from configs.llm_config import BlueberryConfig
 from models.llm import MinimalLLM
 from optimizers.muon import Muon
+from optimizers.sumo import SUMO
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
 
@@ -68,6 +69,41 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     )
 
     return [muon_optimizer, adamw_optimizer]
+
+
+def setup_sumo_optimizer(model: nn.Module, config: BlueberryConfig):
+    """Setup SUMO optimizer with hybrid approach (SUMO for 2D, AdamW for rest)"""
+    sumo_params = []
+    adamw_params = []
+
+    for name, param in model.named_parameters():
+        if (param.ndim == 2 and 
+            'token_embedding' not in name and 
+            'norm' not in name and 
+            param.requires_grad):
+            sumo_params.append(param)
+        else:
+            adamw_params.append(param)
+
+    print(f"  SUMO parameters: {sum(p.numel() for p in sumo_params):,}")
+    print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+
+    sumo_optimizer = SUMO(
+        sumo_params,
+        lr=config.sumo_lr,
+        momentum=config.sumo_momentum,
+        rank=config.sumo_rank,
+        subspace_update_freq=config.sumo_subspace_update_freq,
+        perp_grad_scale=config.sumo_perp_grad_scale,
+        norm_growth_limit=config.sumo_norm_growth_limit,
+    )
+    adamw_optimizer = torch.optim.AdamW(
+        adamw_params,
+        lr=config.adamw_lr,
+        weight_decay=config.weight_decay
+    )
+
+    return [sumo_optimizer, adamw_optimizer]
 
 
 def train_model(
@@ -493,6 +529,7 @@ def train_minimal_llm(
     experiment_name: Optional[str] = None,
     load_weights_path: Optional[str] = None,
     target_train_loss: Optional[float] = None,
+    optimizer_type: str = "muon",
 ):
     print(f"\n🚀 Training dense model")
     setup_start = time.time()
@@ -558,7 +595,12 @@ def train_minimal_llm(
     # ============================================
     # 6. Create FRESH optimizers (no accumulated state)
     # ============================================
-    optimizers = setup_muon_optimizer(model, config)
+    if optimizer_type == "sumo":
+        print(f"🔧 Using SUMO optimizer (rank={config.sumo_rank})")
+        optimizers = setup_sumo_optimizer(model, config)
+    else:
+        print(f"🔧 Using Muon optimizer")
+        optimizers = setup_muon_optimizer(model, config)
 
     # ============================================
     # 7. Create FRESH schedulers

@@ -40,6 +40,14 @@ class BlueberryConfig:
     grad_clip: float = 1.0
     use_amp: bool = True
     
+    # SUMO optimizer parameters
+    sumo_lr: float = 0.02
+    sumo_rank: int = 16                    # Low-rank subspace dimension r
+    sumo_momentum: float = 0.95            # Momentum coefficient β
+    sumo_subspace_update_freq: int = 200   # How often to update subspace (K)
+    sumo_perp_grad_scale: float = 0.1      # Scale for perpendicular gradient α
+    sumo_norm_growth_limit: float = 1.1    # Max norm growth ratio γ
+    
     # Logging
     log_milestones: Tuple[int, ...] = (100, 500, 1000)
 

@@ -186,6 +186,7 @@ def main():
     parser.add_argument("--target_train_loss", type=float, default=0.0, help="Stop training when training loss reaches this value")
     parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
+    parser.add_argument("--optimizer", type=str, default="muon", choices=["muon", "sumo"], help="Optimizer type: muon or sumo")
 
     args = parser.parse_args()
 
@@ -309,6 +310,7 @@ def main():
         experiment_name=experiment_name,
         load_weights_path=args.load_checkpoint,
         target_train_loss=args.target_train_loss,
+        optimizer_type=args.optimizer,
     )
 
 
