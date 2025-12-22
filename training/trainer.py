@@ -601,25 +601,34 @@ def train_minimal_llm(
     warmup_steps = max(1, int(total_steps * config.warmup_ratio))
     schedule_type = getattr(config, 'schedule_type', 'cosine')
     
+    # Skip scheduler for Adafactor with relative_step (it manages LR internally)
+    use_adafactor_relative = (
+        getattr(config, 'use_adafactor', False) and 
+        getattr(config, 'adafactor_relative_step', False)
+    )
+    
     schedulers = []
-    for optimizer in optimizers:
-        if schedule_type == 'cosine':
-            def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
-                if current_step < warmup:
-                    return current_step / warmup
-                progress = (current_step - warmup) / max(1, total - warmup)
-                return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
-        elif schedule_type == 'linear':
-            def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
-                if current_step < warmup:
-                    return current_step / warmup
-                progress = (current_step - warmup) / max(1, total - warmup)
-                return max(0.1, 1.0 - progress)
-        else:  # constant
-            def lr_lambda(current_step, warmup=warmup_steps):
-                return current_step / warmup if current_step < warmup else 1.0
-        
-        schedulers.append(torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda))
+    if not use_adafactor_relative:
+        for optimizer in optimizers:
+            if schedule_type == 'cosine':
+                def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
+                    if current_step < warmup:
+                        return current_step / warmup
+                    progress = (current_step - warmup) / max(1, total - warmup)
+                    return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+            elif schedule_type == 'linear':
+                def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
+                    if current_step < warmup:
+                        return current_step / warmup
+                    progress = (current_step - warmup) / max(1, total - warmup)
+                    return max(0.1, 1.0 - progress)
+            else:  # constant
+                def lr_lambda(current_step, warmup=warmup_steps):
+                    return current_step / warmup if current_step < warmup else 1.0
+            
+            schedulers.append(torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda))
+    else:
+        print("  📊 Using Adafactor internal LR scheduling (relative_step)")
 
     # ============================================
     # 8. Reset RNG for reproducible training
