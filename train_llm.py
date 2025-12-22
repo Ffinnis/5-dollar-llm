@@ -186,6 +186,12 @@ def main():
     parser.add_argument("--target_train_loss", type=float, default=0.0, help="Stop training when training loss reaches this value")
     parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
+    
+    # DSA Arguments
+    parser.add_argument("--use_dsa", type=str, default="false", help="Enable DeepSeek Sparse Attention (true/false)")
+    parser.add_argument("--dsa_n_index_heads", type=int, help="Number of index heads for DSA")
+    parser.add_argument("--dsa_index_dim", type=int, help="Dimension of index heads for DSA")
+    parser.add_argument("--dsa_top_k", type=int, help="Top-K tokens to select in DSA")
 
     args = parser.parse_args()
 
@@ -224,6 +230,18 @@ def main():
         config.gradient_accumulation_steps = args.gradient_accumulation_steps
     if args.log_every is not None:
         config.log_every = args.log_every
+    
+    if args.log_every is not None:
+        config.log_every = args.log_every
+        
+    if args.use_dsa.lower() == "true":
+        config.use_dsa = True
+    if args.dsa_n_index_heads is not None:
+        config.dsa_n_index_heads = args.dsa_n_index_heads
+    if args.dsa_index_dim is not None:
+        config.dsa_index_dim = args.dsa_index_dim
+    if args.dsa_top_k is not None:
+        config.dsa_top_k = args.dsa_top_k
     
     use_warmup = (args.warmup.lower() == "true")
 
