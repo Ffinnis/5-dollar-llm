@@ -14,6 +14,7 @@ from configs.llm_config import BlueberryConfig
 from models.llm import MinimalLLM
 from optimizers.muon import Muon
 from optimizers.sumo import SUMO
+from optimizers.muon_svd import MuonSVD
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
 
@@ -62,6 +63,33 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
 
     muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
+    adamw_optimizer = torch.optim.AdamW(
+        adamw_params,
+        lr=config.adamw_lr,
+        weight_decay=config.weight_decay
+    )
+
+    return [muon_optimizer, adamw_optimizer]
+
+
+def setup_muonsvd_optimizer(model: nn.Module, config: BlueberryConfig):
+    """Setup MuonSVD optimizer (Muon with exact SVD instead of Newton-Schulz)"""
+    muon_params = []
+    adamw_params = []
+
+    for name, param in model.named_parameters():
+        if (param.ndim == 2 and 
+            'token_embedding' not in name and 
+            'norm' not in name and 
+            param.requires_grad):
+            muon_params.append(param)
+        else:
+            adamw_params.append(param)
+
+    print(f"  MuonSVD parameters: {sum(p.numel() for p in muon_params):,}")
+    print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+
+    muon_optimizer = MuonSVD(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
     adamw_optimizer = torch.optim.AdamW(
         adamw_params,
         lr=config.adamw_lr,
@@ -598,6 +626,9 @@ def train_minimal_llm(
     if optimizer_type == "sumo":
         print(f"🔧 Using SUMO optimizer (rank={config.sumo_rank})")
         optimizers = setup_sumo_optimizer(model, config)
+    elif optimizer_type == "muonsvd":
+        print(f"🔧 Using MuonSVD optimizer (exact SVD)")
+        optimizers = setup_muonsvd_optimizer(model, config)
     else:
         print(f"🔧 Using Muon optimizer")
         optimizers = setup_muon_optimizer(model, config)
