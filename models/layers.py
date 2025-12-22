@@ -126,71 +126,39 @@ class MultiHeadAttention(nn.Module):
 
         attn_mask = None
         if self.use_dsa:
+            # Create mask based on Top-K
+            # 1. Causal Masking
             # Calculate index scores: [B, T, T]
             index_scores = self.indexer(x, x)
-            # Create mask based on Top-K
-            # We want to keep positions in top-k.
-            # Warning: for causal attention, we must also respect causality.
-            # But the indexer is trained to select useful past tokens.
-            # The causal mask is usually handled by scaled_dot_product_attention's is_causal=True.
-            # If we pass an attn_mask, is_causal must be False in some versions or combined.
-            # For simplicity, let's construct a boolean mask: False (ignored) for non-top-k.
             
-            # topk returns values, indices. We verify against the k-th value.
-            # However, for variable sequence lengths in a batch, and causal masking...
-            # The easiest way to combine is:
-            # 1. Get causal mask (handled by function if is_causal=True).
-            # 2. Get DSA mask.
-            # 3. Combine.
-            # But scaled_dot_product_attention with is_causal=True AND attn_mask is supported.
-            # Mask shape: [B, T, T] or broadcastable.
-            
-            # Select top-k references for each query.
-            # index_scores: [B, T, T]
-            # Since indexer should only attend to past? The formula suggests "preceding token h_s".
-            # So we should mask future tokens in index_scores before top-k?
-            # Or reliance on causal mask later?
-            # If we pick top-k from *all* tokens, we might pick future ones which will be masked by causality anyway.
-            # Ideally we mask future in index_scores first.
             causal_mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
-            index_scores = index_scores.masked_fill(~causal_mask, float('-inf'))
+            scores_for_topk = index_scores.masked_fill(~causal_mask, float('-inf'))
             
-            # Now top-k across the last dim (keys)
+            # 2. Top-K Selection
             k_val = min(self.dsa_top_k, seq_len)
-            top_scores, _ = torch.topk(index_scores, k_val, dim=-1)
+            top_scores, _ = torch.topk(scores_for_topk, k_val, dim=-1)
             
-            # Threshold is the k-th score
-            # [B, T, 1]
+            # Threshold [B, T, 1]
             threshold = top_scores[:, :, -1].unsqueeze(-1)
             
-            # Hard mask (Boolean/Binary)
-            # [B, T, T] (True means keep)
-            hard_mask = (index_scores >= threshold) & causal_mask
+            # Hard Mask [B, T, T] (True means keep)
+            hard_mask = (scores_for_topk >= threshold) & causal_mask
             hard_mask_float = hard_mask.float()
             
-            # Straight-Through Estimator (STE)
-            # We want gradients to flow to index_scores.
-            # Forward: uses hard_mask_float (0.0 or 1.0)
-            # Backward: uses sigmoid(index_scores)
-            # Note: index_scores can be large/negative, so sigmoid gives 0..1 proxy.
-            # We normalize or just use raw? Raw is fine.
-            # mask = (hard - soft).detach() + soft
-            soft_mask = torch.sigmoid(index_scores)
+            # 3. Straight-Through Estimator (STE)
+            # Use safe scores for sigmoid to avoid NaN from -inf
+            safe_scores = index_scores.clone()
+            safe_scores = safe_scores.masked_fill(~causal_mask, -1e4) 
+            
+            # Scale to keep sigmoid gradients in useful range
+            soft_mask = torch.sigmoid(safe_scores * 0.1) 
             ste_mask = (hard_mask_float - soft_mask).detach() + soft_mask
             
-            # Construct attention bias
-            # We want 0.0 where ste_mask is close to 1, and -inf where close to 0.
-            # Since standard attention adds the mask, we can do:
-            # attn_mask = (1.0 - ste_mask) * large_negative
-            # Check for large negative: -1e9 usually safe for float32.
-            # For gradients:
-            # bias' = -large_neg * mask' 
-            # if mask goes up (better selection), bias goes up (less negative), so attention prob goes up. Correct.
-            
-            large_neg = -1e4 # Sufficiently small for softmax to ignore
+            # 4. Attention Bias
+            # (1.0 - ste_mask) * large_neg
+            large_neg = -1e9
             attn_mask = (1.0 - ste_mask) * large_neg
             
-            # Broadcast over heads
             attn_mask = attn_mask.unsqueeze(1) # [B, 1, T, T]
             
         attn_output = F.scaled_dot_product_attention(
