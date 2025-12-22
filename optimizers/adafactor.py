@@ -17,6 +17,47 @@ import math
 from typing import Optional, Tuple
 
 
+@torch.compile
+def _adafactor_update_2d(
+    grad: torch.Tensor,
+    exp_avg_sq_row: torch.Tensor,
+    exp_avg_sq_col: torch.Tensor,
+    beta2: float,
+    eps1: float,
+) -> torch.Tensor:
+    """Compiled update for 2D parameters (matrices)."""
+    grad_sqr = grad.pow(2).add_(eps1)
+    
+    # Compute row and column means
+    row_mean = grad_sqr.mean(dim=-1)
+    col_mean = grad_sqr.mean(dim=0)
+    
+    # Update EMAs in-place
+    exp_avg_sq_row.mul_(beta2).add_(row_mean, alpha=1 - beta2)
+    exp_avg_sq_col.mul_(beta2).add_(col_mean, alpha=1 - beta2)
+    
+    # Approximate full second moment: V_hat = (R * C) / mean(R)
+    r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean()).unsqueeze(-1)
+    c_factor = exp_avg_sq_col.unsqueeze(0)
+    v_hat = (r_factor * c_factor).add_(eps1)
+    
+    # Normalized update
+    return grad / v_hat.sqrt()
+
+
+@torch.compile  
+def _adafactor_update_1d(
+    grad: torch.Tensor,
+    exp_avg_sq: torch.Tensor,
+    beta2: float,
+    eps1: float,
+) -> torch.Tensor:
+    """Compiled update for 1D parameters (vectors)."""
+    grad_sqr = grad.pow(2).add_(eps1)
+    exp_avg_sq.mul_(beta2).add_(grad_sqr, alpha=1 - beta2)
+    return grad / exp_avg_sq.sqrt()
+
+
 class Adafactor(Optimizer):
     """
     Adafactor optimizer with memory-efficient factorized second moments.
@@ -160,34 +201,38 @@ class Adafactor(Optimizer):
                 # Get beta2 (time-dependent)
                 beta2 = self._get_beta2(state['step'], group['decay_rate'])
                 
-                # Compute gradient squared with epsilon for stability
                 eps1 = group['eps'][0]
-                eps2 = group['eps'][1]
-                grad_sqr = grad.pow(2).add_(eps1)
                 
-                # Update factorized second moment
-                if len(grad_shape) >= 2:
+                # Update factorized second moment using compiled kernels
+                if len(grad_shape) == 2:
+                    # Use compiled 2D update
+                    update = _adafactor_update_2d(
+                        grad,
+                        state['exp_avg_sq_row'],
+                        state['exp_avg_sq_col'],
+                        beta2,
+                        eps1,
+                    )
+                elif len(grad_shape) >= 2:
+                    # Fallback for higher-dim tensors (not compiled)
                     exp_avg_sq_row = state['exp_avg_sq_row']
                     exp_avg_sq_col = state['exp_avg_sq_col']
-                    
-                    # Compute row and column sums
+                    grad_sqr = grad.pow(2).add_(eps1)
                     row_mean = grad_sqr.mean(dim=-1)
                     col_mean = grad_sqr.mean(dim=tuple(range(grad.dim() - 1)))
-                    
-                    # Update EMAs
                     exp_avg_sq_row.mul_(beta2).add_(row_mean, alpha=1 - beta2)
                     exp_avg_sq_col.mul_(beta2).add_(col_mean, alpha=1 - beta2)
-                    
-                    # Approximate full second moment
                     v_hat = self._approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col)
                     v_hat = v_hat.add_(eps1)
+                    update = grad / v_hat.sqrt()
                 else:
-                    exp_avg_sq = state['exp_avg_sq']
-                    exp_avg_sq.mul_(beta2).add_(grad_sqr, alpha=1 - beta2)
-                    v_hat = exp_avg_sq
-                
-                # Compute normalized update: U = G / sqrt(V_hat)
-                update = grad / v_hat.sqrt()
+                    # Use compiled 1D update
+                    update = _adafactor_update_1d(
+                        grad,
+                        state['exp_avg_sq'],
+                        beta2,
+                        eps1,
+                    )
                 
                 # Update clipping (not gradient clipping!)
                 # U_hat = U / max(1, RMS(U) / clip_threshold)
