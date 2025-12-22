@@ -75,7 +75,9 @@ class MultiHeadAttention(nn.Module):
         use_dsa: bool = False,
         dsa_n_index_heads: int = 4,
         dsa_index_dim: int = 64,
-        dsa_top_k: int = 32,
+        dsa_top_k: int = 256,
+        dsa_top_k_start: int = 1024,
+        dsa_use_schedule: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
@@ -86,7 +88,13 @@ class MultiHeadAttention(nn.Module):
         
         # DSA
         self.use_dsa = use_dsa
-        self.dsa_top_k = dsa_top_k
+        self.dsa_top_k = dsa_top_k  # Final/target top_k
+        self.dsa_top_k_start = dsa_top_k_start
+        self.dsa_use_schedule = dsa_use_schedule
+        # Progress from 0.0 (start) to 1.0 (end of training)
+        # Updated externally by the training loop
+        self.register_buffer('dsa_progress', torch.tensor(0.0), persistent=False)
+        
         if use_dsa:
             self.indexer = LightningIndexer(d_model, dsa_n_index_heads, dsa_index_dim)
 
@@ -98,6 +106,16 @@ class MultiHeadAttention(nn.Module):
         self.k_norm = nn.RMSNorm(self.d_k)
         self.rotary = Rotary(self.d_k, max_seq_len)
         self.dropout = dropout
+    
+    def get_current_top_k(self, seq_len: int) -> int:
+        """Calculate current top_k based on training progress."""
+        if not self.dsa_use_schedule:
+            return min(self.dsa_top_k, seq_len)
+        
+        # Linear interpolation from start to end
+        progress = self.dsa_progress.item()
+        current_k = self.dsa_top_k_start + progress * (self.dsa_top_k - self.dsa_top_k_start)
+        return min(int(current_k), seq_len)
 
     def forward(self, x):
         batch_size, seq_len = x.size(0), x.size(1)
@@ -134,8 +152,8 @@ class MultiHeadAttention(nn.Module):
             causal_mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
             scores_for_topk = index_scores.masked_fill(~causal_mask, float('-inf'))
             
-            # 2. Top-K Selection
-            k_val = min(self.dsa_top_k, seq_len)
+            # 2. Top-K Selection (scheduled)
+            k_val = self.get_current_top_k(seq_len)
             top_scores, _ = torch.topk(scores_for_topk, k_val, dim=-1)
             
             # Threshold [B, T, 1]
@@ -176,7 +194,9 @@ class TransformerBlock(nn.Module):
         use_dsa: bool = False,
         dsa_n_index_heads: int = 4,
         dsa_index_dim: int = 64,
-        dsa_top_k: int = 32,
+        dsa_top_k: int = 256,
+        dsa_top_k_start: int = 1024,
+        dsa_use_schedule: bool = True,
     ):
         super().__init__()
 
@@ -185,7 +205,9 @@ class TransformerBlock(nn.Module):
             use_dsa=use_dsa,
             dsa_n_index_heads=dsa_n_index_heads,
             dsa_index_dim=dsa_index_dim,
-            dsa_top_k=dsa_top_k
+            dsa_top_k=dsa_top_k,
+            dsa_top_k_start=dsa_top_k_start,
+            dsa_use_schedule=dsa_use_schedule,
         )
         self.feed_forward = SwiGLUFeedForward(d_model, d_ff, dropout)
 

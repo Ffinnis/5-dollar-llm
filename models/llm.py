@@ -31,6 +31,8 @@ class MinimalLLM(nn.Module):
                     dsa_n_index_heads=config.dsa_n_index_heads,
                     dsa_index_dim=config.dsa_index_dim,
                     dsa_top_k=config.dsa_top_k,
+                    dsa_top_k_start=config.dsa_top_k_start,
+                    dsa_use_schedule=config.dsa_use_schedule,
                 )
                 for i in range(config.n_layers)
             ]
@@ -53,6 +55,13 @@ class MinimalLLM(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    
+    def set_dsa_progress(self, progress: float):
+        """Update DSA progress (0.0 to 1.0) for all attention layers."""
+        progress_tensor = torch.tensor(progress)
+        for block in self.transformer_blocks:
+            if hasattr(block.attention, 'dsa_progress'):
+                block.attention.dsa_progress.copy_(progress_tensor)
 
     def forward(self, x):
         # Token embeddings

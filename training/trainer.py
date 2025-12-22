@@ -162,6 +162,11 @@ def train_model(
             
             # Count tokens in this batch (approx: batch_size * seq_len)
             batch_tokens = x.numel()
+            
+            # Update DSA progress for scheduled top_k annealing
+            if hasattr(model, 'set_dsa_progress'):
+                progress = tokens_seen / config.train_tokens
+                model.set_dsa_progress(progress)
 
             # Forward pass (optimized to avoid large contiguous copies of logits)
             if config.use_amp:

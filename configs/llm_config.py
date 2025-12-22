@@ -17,7 +17,9 @@ class BlueberryConfig:
     use_dsa: bool = False
     dsa_n_index_heads: int = 4
     dsa_index_dim: int = 64
-    dsa_top_k: int = 32
+    dsa_top_k: int = 256  # Final top_k value (or fixed if no scheduling)
+    dsa_top_k_start: int = 1024  # Starting top_k (for annealing)
+    dsa_use_schedule: bool = True  # Whether to anneal top_k
     
     # Data params
     max_seq_len: int = 2048  
