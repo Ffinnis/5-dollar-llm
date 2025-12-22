@@ -246,6 +246,7 @@ def train_model(
                     # Use the scalar value we polled above
                     perplexity = math.exp(min(current_loss_val if 'current_loss_val' in locals() else ce_loss.item(), 20))
                     current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
+                    lr_str = f'{current_lr:.5f}' if current_lr is not None else 'auto'
 
                 # Update progress bar
                 tokens_per_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
@@ -255,11 +256,11 @@ def train_model(
                     'step': f'{step}/{est_total_steps}',
                     'loss': f'{current_loss_val:.4f}',
                     'acc': f'{accuracy:.3f}',
-                    'lr': f'{current_lr:.5f}'
+                    'lr': lr_str
                 })
                 # Console print for visibility
                 if step % (log_every * 10) == 0 or stopped_early:
-                    print(f" [Step {step}] Loss: {current_loss_val:.4f} | Acc: {accuracy:.3f} | LR: {current_lr:.6f}")
+                    print(f" [Step {step}] Loss: {current_loss_val:.4f} | Acc: {accuracy:.3f} | LR: {lr_str}")
             
             pbar.update(batch_tokens)
             tokens_seen += batch_tokens
@@ -282,10 +283,11 @@ def train_model(
                 metrics_history['elapsed_times'].append(elapsed_time)
                 metrics_history['learning_rates'].append(current_lr)
                 
+                lr_display = f'{current_lr:.5f}' if current_lr is not None else 'auto'
                 print(f"\nStep {step}: Val Loss: {eval_metrics['val_loss']:.4f}, "
                       f"Val Acc: {eval_metrics['val_accuracy']:.4f}, "
                       f"Val PPL: {eval_metrics['val_perplexity']:.2f}, "
-                      f"LR: {current_lr:.5f}")
+                      f"LR: {lr_display}")
                 
                 # Early stopping check
                 if early_stopper is not None:
