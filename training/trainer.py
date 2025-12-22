@@ -70,6 +70,33 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     return [muon_optimizer, adamw_optimizer]
 
 
+def setup_adafactor_optimizer(model: nn.Module, config: BlueberryConfig):
+    """Setup Adafactor optimizer - memory efficient alternative to Muon+AdamW"""
+    from optimizers.adafactor import Adafactor
+    
+    params = [p for p in model.parameters() if p.requires_grad]
+    total_params = sum(p.numel() for p in params)
+    print(f"  Adafactor parameters: {total_params:,}")
+    
+    # Determine if using relative step or fixed LR
+    use_relative = getattr(config, 'adafactor_relative_step', False)
+    lr = None if use_relative else getattr(config, 'adafactor_lr', 1e-3)
+    
+    optimizer = Adafactor(
+        params,
+        lr=lr,
+        eps=(1e-30, 1e-3),
+        clip_threshold=getattr(config, 'adafactor_clip_threshold', 1.0),
+        decay_rate=-0.8,
+        beta1=getattr(config, 'adafactor_beta1', None),
+        weight_decay=getattr(config, 'adafactor_weight_decay', 0.0),
+        scale_parameter=getattr(config, 'adafactor_scale_parameter', True),
+        relative_step=use_relative,
+    )
+    
+    return [optimizer]
+
+
 def train_model(
     model: nn.Module,
     config: BlueberryConfig,
@@ -558,7 +585,12 @@ def train_minimal_llm(
     # ============================================
     # 6. Create FRESH optimizers (no accumulated state)
     # ============================================
-    optimizers = setup_muon_optimizer(model, config)
+    if getattr(config, 'use_adafactor', False):
+        print("  📦 Using Adafactor optimizer (memory-efficient)")
+        optimizers = setup_adafactor_optimizer(model, config)
+    else:
+        print("  📦 Using Muon + AdamW optimizer")
+        optimizers = setup_muon_optimizer(model, config)
 
     # ============================================
     # 7. Create FRESH schedulers

@@ -29,6 +29,15 @@ class BlueberryConfig:
     adamw_lr: float = 0.006
     warmup_ratio: float = 0.0
     schedule_type: str = "constant"
+    
+    # Adafactor parameters (memory-efficient alternative)
+    use_adafactor: bool = True  # Set to True to use Adafactor instead of Muon+AdamW
+    adafactor_lr: Optional[float] = 1e-3  # Fixed LR (set to None for relative step)
+    adafactor_beta1: Optional[float] = None  # None = no momentum (saves memory)
+    adafactor_weight_decay: float = 0.0
+    adafactor_clip_threshold: float = 1.0
+    adafactor_relative_step: bool = False  # If True, ignores adafactor_lr
+    adafactor_scale_parameter: bool = True
 
     # Evaluation
     eval_every: int = 2000
