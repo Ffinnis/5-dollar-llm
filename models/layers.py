@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchtune.modules import RotaryPositionalEmbeddings
-from .components import SwiGLUFeedForward
 
 
 class Rotary(nn.Module):
@@ -78,35 +77,3 @@ class MultiHeadAttention(nn.Module):
         # attn_output = attn_output.transpose(1, 2).reshape(B, T, self.d_model)
         return self.w_o(attn_output)
 
-
-class TransformerBlock(nn.Module):
-    """Standard transformer block with dense feed-forward"""
-
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        d_ff: int,
-        max_seq_len: int,
-        dropout: float = 0.1,
-        n_kv_heads: int | None = None,
-    ):
-        super().__init__()
-
-        self.attention = MultiHeadAttention(d_model, n_heads, max_seq_len, dropout, n_kv_heads)
-        self.feed_forward = SwiGLUFeedForward(d_model, d_ff, dropout)
-
-        # Normalization layers
-        self.norm1 = nn.RMSNorm(d_model)
-        self.norm2 = nn.RMSNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        # Self-attention
-        attn_out = self.attention(self.norm1(x))
-        x = x + self.dropout(attn_out)
-
-        # Feed-forward
-        ff_out = self.feed_forward(self.norm2(x))
-        x = x + self.dropout(ff_out)
-        return x
