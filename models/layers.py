@@ -143,23 +143,10 @@ class MultiHeadAttention(nn.Module):
             
             # Hard Mask [B, T, T] (True means keep)
             hard_mask = (scores_for_topk >= threshold) & causal_mask
-            hard_mask_float = hard_mask.float()
             
-            # 3. Straight-Through Estimator (STE)
-            # Use safe scores for sigmoid to avoid NaN from -inf
-            safe_scores = index_scores.clone()
-            safe_scores = safe_scores.masked_fill(~causal_mask, -1e4) 
-            
-            # Scale to keep sigmoid gradients in useful range
-            soft_mask = torch.sigmoid(safe_scores * 0.1) 
-            ste_mask = (hard_mask_float - soft_mask).detach() + soft_mask
-            
-            # 4. Attention Bias
-            # (1.0 - ste_mask) * large_neg
-            large_neg = -1e9
-            attn_mask = (1.0 - ste_mask) * large_neg
-            
-            attn_mask = attn_mask.unsqueeze(1) # [B, 1, T, T]
+            # Use boolean mask directly - PyTorch SDPA supports this
+            # True = attend, False = mask out
+            attn_mask = hard_mask.unsqueeze(1) # [B, 1, T, T]
             
         attn_output = F.scaled_dot_product_attention(
             Q, K, V, 
