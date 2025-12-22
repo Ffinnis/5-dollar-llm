@@ -639,6 +639,13 @@ def train_minimal_llm(
     
     setup_time = time.time() - setup_start
     print(f"⚙️ Setup & Compilation complete in {setup_time:.2f}s")
+    
+    # Log GPU memory usage after setup
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        allocated = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        print(f"📊 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
     print("-" * 70)
 
     # ============================================
@@ -712,6 +719,12 @@ def train_minimal_llm(
     print(f"Warmup & Setup:                  {format_time(setup_time)}")
     print(f"Training Time (⏱️ Speedrun):      {format_time(total_training_time)}")
     print(f"Total Tokens:                    {tokens_seen:,}")
+    
+    # GPU Memory stats
+    if torch.cuda.is_available():
+        peak_memory = torch.cuda.max_memory_allocated() / 1e9
+        print(f"Peak GPU Memory:                 {peak_memory:.2f} GB")
+    
     print("-" * 70)
     print(f"Final Train Loss:                {final_eval.get('train_loss', 0.0):.4f}")
     print(f"Final Val Loss:                  {final_eval['val_loss']:.4f}")
