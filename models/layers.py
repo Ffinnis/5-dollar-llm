@@ -156,33 +156,48 @@ class MultiHeadAttention(nn.Module):
             index_scores = index_scores.masked_fill(~causal_mask, float('-inf'))
             
             # Now top-k across the last dim (keys)
-            # If seq_len < top_k, we take all.
             k_val = min(self.dsa_top_k, seq_len)
             top_scores, _ = torch.topk(index_scores, k_val, dim=-1)
             
             # Threshold is the k-th score
-            threshold = top_scores[:, :, -1].unsqueeze(-1) # [B, T, 1]
-            dsa_mask = (index_scores >= threshold) & causal_mask # [B, T, T]
+            # [B, T, 1]
+            threshold = top_scores[:, :, -1].unsqueeze(-1)
             
-            # Convert to float mask for attention (0.0 for keep, -inf for mask)?? 
-            # Or bool: True for keep?
-            # F.scaled_dot_product_attention expects:
-            # "attn_mask – boolean mask where True indicates elements that ... are NOT ignored" (PyTorch > 2.0?)
-            # Wait, docs say: 
-            # "If a boolean mask is provided, elements with True are not ignored."
-            # "If a float mask is provided, it is added to the attention weight."
-            # We will use boolean.
+            # Hard mask (Boolean/Binary)
+            # [B, T, T] (True means keep)
+            hard_mask = (index_scores >= threshold) & causal_mask
+            hard_mask_float = hard_mask.float()
             
-            # We must ensure we broadcast over heads.
-            # Mask shape [B, 1, T, T] or [B, T, T] is fine.
-            attn_mask = dsa_mask.unsqueeze(1) # [B, 1, T, T]
+            # Straight-Through Estimator (STE)
+            # We want gradients to flow to index_scores.
+            # Forward: uses hard_mask_float (0.0 or 1.0)
+            # Backward: uses sigmoid(index_scores)
+            # Note: index_scores can be large/negative, so sigmoid gives 0..1 proxy.
+            # We normalize or just use raw? Raw is fine.
+            # mask = (hard - soft).detach() + soft
+            soft_mask = torch.sigmoid(index_scores)
+            ste_mask = (hard_mask_float - soft_mask).detach() + soft_mask
+            
+            # Construct attention bias
+            # We want 0.0 where ste_mask is close to 1, and -inf where close to 0.
+            # Since standard attention adds the mask, we can do:
+            # attn_mask = (1.0 - ste_mask) * large_negative
+            # Check for large negative: -1e9 usually safe for float32.
+            # For gradients:
+            # bias' = -large_neg * mask' 
+            # if mask goes up (better selection), bias goes up (less negative), so attention prob goes up. Correct.
+            
+            large_neg = -1e4 # Sufficiently small for softmax to ignore
+            attn_mask = (1.0 - ste_mask) * large_neg
+            
+            # Broadcast over heads
+            attn_mask = attn_mask.unsqueeze(1) # [B, 1, T, T]
             
         attn_output = F.scaled_dot_product_attention(
             Q, K, V, 
             attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=True if attn_mask is None else False 
-            # If we provide a mask that already includes causality (which we did), we set is_causal=False.
         )
         attn_output = attn_output.transpose(1, 2).reshape(
             batch_size, seq_len, self.d_model
