@@ -119,10 +119,11 @@ def setup_sumo_optimizer(model: nn.Module, config: BlueberryConfig):
     sumo_optimizer = SUMO(
         sumo_params,
         lr=config.sumo_lr,
-        momentum=config.sumo_momentum,
+        alpha=config.sumo_alpha,
+        mu=config.sumo_mu,
+        weight_decay=config.weight_decay,
         rank=config.sumo_rank,
         subspace_update_freq=config.sumo_subspace_update_freq,
-        perp_grad_scale=config.sumo_perp_grad_scale,
         norm_growth_limit=config.sumo_norm_growth_limit,
     )
     adamw_optimizer = torch.optim.AdamW(
