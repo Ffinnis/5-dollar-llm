@@ -47,9 +47,23 @@ Please read [SETUP_INTRUCTIONS](docs/SETUP_INSTRUCTIONS.md) for detailed guide.
 | 3 | 2025-12-22 | 3.7439 | 3.7609 | 17m 8s 637ms | 100,007,936 | [ToheedAkhtar01](https://x.com/ToheedAkhtar01) [GitHub Polar](https://github.com/Open-Superintelligence-Lab/5-dollar-llm/pull/56); [GitHub AdamW](https://github.com/Open-Superintelligence-Lab/5-dollar-llm/pull/67/) | Fused AdamW; Polar Muon - it replaces Muon’s Newton-Schulz iteration with a fixed-coefficient iterative scheme for faster, numerically stable orthogonalization. |
 | 4 | 2025-12-23 | 3.6700 | 3.7094 | 16m 17s 221ms | 100,007,936 | [bigwolfeman](https://github.com/bigwolfeman) | Cast model into bf16 - model = model.to(device, dtype=torch.bfloat16), Note: Optimizers might require higher precision for longer runs |
 
-## 🏅 The 1B Marathon (World Record)
-*Goal: Best Model @ 1B Tokens (Time < 4h)*
+## 🏅 The 1B Marathon (World Record GPT-1)
+*Goal: Best Model @ 1B Tokens (GPT-1)*
 
-| # | Date | Val Loss | Time | User | Notes |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| - | - | - | - | - | - |
+| # | Date | Train Loss | Val Loss | Time | Tokens Used | User | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | 2025-12-23 | 3.4747 | 3.3580 | 2h 51m 31s | 1,000,007,680 | [Vuk Rosić](https://x.com/VukRosic99), [ToheedAkhtar01](https://x.com/ToheedAkhtar01), [GitHub #67](https://github.com/Open-Superintelligence-Lab/5-dollar-llm/pull/67/), [GitHub #56](https://github.com/Open-Superintelligence-Lab/5-dollar-llm/pull/56) | n_layers 32→22, optimized LRs (Muon 0.024, AdamW 0.006), Squared ReLU, Fused AdamW, Polar Muon|
+
+This result is confirmed again: 2h 50m 55s, train loss: 3.4917, val loss: 3.3583
+
+
+## 🤝 GPUs: Free & Paid
+**You may rent 4090 affordably at**
+[Salad](https://salad.com/pricing) | [Novita](https://novita.ai/pricing?gpu=1) [(or use our affiliate to help us get more compute ❤️)](https://novita.ai/?ref=mjqyndm&utm_source=affiliate) | [VastAI](https://vast.ai/pricing) - A lot of GPU providers also give 50% off on spot billing.
+
+**Free GPU Alternatives:**
+- **Lightning AI**: You can use the free **L4 GPU**.
+- **Google Colab**: Use the free T4 or paid A100.
+- **Tip**: If the model doesn't fit in your GPU memory, you can **reduce the model size** (e.g., reduce `batch_size`, `n_layer`, or `n_embd` in `configs/llm_config.py`).
+
+Once you create improvement, we will measure it on 4090.
