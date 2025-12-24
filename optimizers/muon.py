@@ -54,7 +54,7 @@ class Muon(torch.optim.Optimizer):
         """Epoch-shift: bias toward shallow layers early, deep layers late"""
         b = self.num_layers
         indices = torch.arange(b, dtype=torch.float32)
-        weights = torch.exp(self.alpha * ((1 - progress) * (b - 1 - indices) + progress * indices))
+        weights = torch.exp(self.alpha * ((1 - progress) * indices + progress * (b - 1 - indices)))
         probs = weights / weights.sum()
         return torch.multinomial(probs, 1).item()
 
