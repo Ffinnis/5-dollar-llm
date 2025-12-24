@@ -161,6 +161,33 @@ def train_model(
             else:
                 raise TypeError(f"Unsupported batch type: {type(batch)}")
 
+            # ============================================
+            # DROP-MUON BACKWARD PASS TRUNCATION
+            # ============================================
+            # 1. Calculate progress
+            tokens_per_opt_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
+            total_opt_steps = config.train_tokens // tokens_per_opt_step
+            progress = min(1.0, step / max(1, total_opt_steps))
+
+            # 2. Sample cutoff from Muon
+            cutoff_idx = 0
+            muon_opt = next((opt for opt in optimizers if isinstance(opt, Muon)), None)
+            if muon_opt is not None:
+                cutoff_idx = muon_opt.sample_cutoff(progress)
+            
+            # 3. Aggressively freeze layers < cutoff (skips gradient comp)
+            # We need to map model layers to indices. This depends on model structure.
+            # Assuming models/llm.py has `get_layer_param_mapping` or similar which we used in setup.
+            # Ideally we have this mapping cached.
+            layer_params = model.get_layer_param_mapping()
+            
+            if cutoff_idx > 0:
+                for layer_idx, params in layer_params.items():
+                    if layer_idx < cutoff_idx:
+                        for p in params:
+                            p.requires_grad = False
+            # ============================================
+
             x, y = x.to(device), y.to(device)
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
@@ -197,21 +224,25 @@ def train_model(
                 loss = ce_loss / config.gradient_accumulation_steps
                 loss.backward()
 
+
             # Optimizer step
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
                 
-                # Training progress for Drop-Muon epoch-shift layer dropping
-                tokens_per_opt_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
-                total_opt_steps = config.train_tokens // tokens_per_opt_step
-                progress = min(1.0, step / max(1, total_opt_steps))
-                
                 for optimizer in optimizers:
                     if isinstance(optimizer, Muon):
-                        optimizer.step(progress=progress)
+                        optimizer.step(cutoff=cutoff_idx)
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
+                    
+                # RESTORE GRADS for next forward pass
+                if 'cutoff_idx' in locals() and cutoff_idx > 0:
+                     for layer_idx, params in layer_params.items():
+                        if layer_idx < cutoff_idx:
+                            for p in params:
+                                p.requires_grad = True
+
                 for scheduler in schedulers:
                     scheduler.step()
 

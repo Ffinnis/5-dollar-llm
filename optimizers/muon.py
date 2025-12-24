@@ -50,17 +50,16 @@ class Muon(torch.optim.Optimizer):
         self.num_layers = num_layers
         self.alpha = alpha
 
-    def _sample_cutoff(self, progress: float) -> int:
+    def sample_cutoff(self, progress: float) -> int:
         """Epoch-shift: bias toward shallow layers early, deep layers late"""
         b = self.num_layers
         indices = torch.arange(b, dtype=torch.float32)
-        weights = torch.exp(self.alpha * ((1 - progress) * indices + progress * (b - 1 - indices)))
+        weights = torch.exp(self.alpha * ((1 - progress) * (b - 1 - indices) + progress * indices))
         probs = weights / weights.sum()
         return torch.multinomial(probs, 1).item()
 
     @torch.no_grad()
-    def step(self, progress: float = 0.0):
-        cutoff = self._sample_cutoff(progress)
+    def step(self, cutoff: int = 0):
 
         for group in self.param_groups:
             layer_idx = group.get('layer_idx', 0)
