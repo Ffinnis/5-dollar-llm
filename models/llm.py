@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from typing import Optional
+from typing import Optional, Dict, List
 from configs.llm_config import BlueberryConfig
 from models.layers import TransformerBlock
 
@@ -65,3 +65,27 @@ class MinimalLLM(nn.Module):
         logits = self.lm_head(x)
 
         return logits
+
+    def get_layer_param_mapping(self) -> Dict[int, List[nn.Parameter]]:
+        """
+        Returns mapping from layer index to list of 2D parameters (for Muon/Drop-Muon).
+        
+        Layer 0 = first transformer block, etc.
+        Only includes 2D weight matrices (not embeddings, norms, or biases).
+        These are the parameters that benefit from Newton-Schulz orthogonalization.
+        
+        Returns:
+            Dict mapping layer_idx -> list of 2D parameters
+        """
+        layer_params: Dict[int, List[nn.Parameter]] = {}
+        
+        for layer_idx, block in enumerate(self.transformer_blocks):
+            params: List[nn.Parameter] = []
+            for name, param in block.named_parameters():
+                # Only include 2D weight matrices that require grad
+                if param.ndim == 2 and param.requires_grad:
+                    params.append(param)
+            layer_params[layer_idx] = params
+        
+        return layer_params
+
