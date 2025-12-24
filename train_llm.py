@@ -187,9 +187,9 @@ def main():
     
     # Drop-Muon arguments
     parser.add_argument("--use-drop-muon", action="store_true", help="Use Drop-Muon optimizer with layer dropping")
-    parser.add_argument("--drop-strategy", type=str, choices=['uniform', 'epoch_shift', 'none'], default='uniform',
-                        help="Drop-Muon sampling strategy: uniform (equal probability), epoch_shift (progressive), or none (no dropping)")
-    parser.add_argument("--drop-alpha", type=float, default=0.5, help="Sharpness parameter for epoch-shift distribution")
+    parser.add_argument("--drop-strategy", type=str, choices=['uniform', 'epoch_shift', 'adaptive', 'none'], default='uniform',
+                        help="Drop-Muon sampling strategy: uniform (equal probability), epoch_shift (progressive), adaptive (gradient-based), or none (no dropping)")
+    parser.add_argument("--drop-alpha", type=float, default=0.5, help="Sharpness parameter for epoch-shift/adaptive distribution")
 
     args = parser.parse_args()
 
