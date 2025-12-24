@@ -231,7 +231,7 @@ def train_model(
                 
                 for optimizer in optimizers:
                     if isinstance(optimizer, Muon):
-                        optimizer.step(cutoff=cutoff_idx)
+                        optimizer.step(cutoff=cutoff_idx, progress=progress)
                     else:
                         optimizer.step()
                     optimizer.zero_grad()

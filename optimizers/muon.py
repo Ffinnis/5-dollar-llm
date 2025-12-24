@@ -59,7 +59,14 @@ class Muon(torch.optim.Optimizer):
         return torch.multinomial(probs, 1).item()
 
     @torch.no_grad()
-    def step(self, cutoff: int = 0):
+    def step(self, cutoff: int = 0, progress: float = 0.0):
+        
+        # Calculate keep probabilities for Inverse Probability Scaling
+        b = self.num_layers
+        indices = torch.arange(b, dtype=torch.float32)
+        weights = torch.exp(self.alpha * ((1 - progress) * (b - 1 - indices) + progress * indices))
+        probs = weights / weights.sum()
+        keep_probs = torch.cumsum(probs, dim=0) # P(cutoff <= i) == P(update layer i)
 
         for group in self.param_groups:
             layer_idx = group.get('layer_idx', 0)
@@ -83,6 +90,12 @@ class Muon(torch.optim.Optimizer):
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 g = zeropower_polar_express(g, steps=group["ns_steps"])
                 g = g.to(p.dtype)
-                p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1)) ** 0.5)
+                
+                # Apply Inverse Probability Scaling
+                # Standard update: p.add_(g, alpha=-lr * scaling_factor)
+                # IPS update: p.add_(g, alpha=-lr * scaling_factor / keep_prob)
+                scale = 1.0 / (keep_probs[layer_idx].item() + 1e-6)
+                
+                p.add_(g.view_as(p), alpha=-group["lr"] * scale * max(1, p.size(-2) / p.size(-1)) ** 0.5)
 
         return cutoff
