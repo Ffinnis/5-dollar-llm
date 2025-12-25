@@ -43,8 +43,30 @@ def zeropower_polar_express(G:torch.Tensor, steps: int = 5,):
 
 class Muon(torch.optim.Optimizer):
     """Muon - MomentUm Orthogonalized by Polar Express / Newton Schulz"""
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+    def __init__(
+        self,
+        params,
+        lr: float = 0.02,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 5,
+        weight_decay: float = 0.0,
+        weight_decay_mode: str = "none",
+    ):
+        if weight_decay < 0:
+            raise ValueError(f"weight_decay must be >= 0, got {weight_decay}")
+        if weight_decay_mode not in {"none", "decoupled", "cautious"}:
+            raise ValueError(
+                f"weight_decay_mode must be one of ['none','decoupled','cautious'], got {weight_decay_mode!r}"
+            )
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_steps=ns_steps,
+            weight_decay=weight_decay,
+            weight_decay_mode=weight_decay_mode,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -65,4 +87,23 @@ class Muon(torch.optim.Optimizer):
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 g = zeropower_polar_express(g, steps=group["ns_steps"]) # steps are 5 for both ns and pe
                 g = g.to(p.dtype)
-                p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+
+                lr_scale = max(1.0, p.size(-2) / p.size(-1)) ** 0.5
+                effective_lr = group["lr"] * lr_scale
+
+                wd = group.get("weight_decay", 0.0)
+                wd_mode = group.get("weight_decay_mode", "none")
+                if wd != 0.0 and wd_mode != "none":
+                    if wd_mode == "decoupled":
+                        p.add_(p, alpha=-effective_lr * wd)
+                    elif wd_mode == "cautious":
+                        # Masked (cautious) decoupled weight decay:
+                        # apply decay only when the optimizer update and parameter have aligned sign
+                        # (i.e., decay does not oppose the optimizer step).
+                        mask = torch.signbit(g) == torch.signbit(p)
+                        mask |= (g == 0) | (p == 0)
+                        p.addcmul_(p, mask.to(dtype=p.dtype), value=-effective_lr * wd)
+                    else:
+                        raise RuntimeError(f"Unexpected weight_decay_mode: {wd_mode!r}")
+
+                p.add_(g.view_as(p), alpha=-effective_lr)

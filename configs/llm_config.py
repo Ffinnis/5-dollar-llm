@@ -36,6 +36,12 @@ class BlueberryConfig:
     
     # Regularization
     weight_decay: float = 0.2
+    # Muon weight decay (applied to 2D weights optimized by Muon)
+    # - mode="none": no weight decay (current default behavior)
+    # - mode="decoupled": standard decoupled weight decay (AdamW-style)
+    # - mode="cautious": masked decoupled weight decay (CWD), with schedule tied to current lr
+    muon_weight_decay: float = 0.0
+    muon_weight_decay_mode: str = "none"
     dropout: float = 0.0
     grad_clip: float = 1.0
     use_amp: bool = True
@@ -46,4 +52,3 @@ class BlueberryConfig:
     def __post_init__(self):
         self.d_k = self.d_model // self.n_heads
         assert self.d_model % self.n_heads == 0, "d_model must be divisible by n_heads"
-

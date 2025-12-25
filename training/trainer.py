@@ -60,7 +60,13 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     print(f"  Muon parameters: {sum(p.numel() for p in muon_params):,}")
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
 
-    muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
+    muon_optimizer = Muon(
+        muon_params,
+        lr=config.muon_lr,
+        momentum=config.muon_momentum,
+        weight_decay=getattr(config, "muon_weight_decay", 0.0),
+        weight_decay_mode=getattr(config, "muon_weight_decay_mode", "none"),
+    )
     adamw_optimizer = torch.optim.AdamW(
         adamw_params,
         lr=config.adamw_lr,
