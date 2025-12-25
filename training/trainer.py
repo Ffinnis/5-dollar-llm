@@ -47,19 +47,34 @@ class EarlyStopping:
 def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     """Setup Muon optimizer with hybrid approach"""
     muon_params = []
-    adamw_params = []
+    adamw_decay_params = []
+    adamw_no_decay_params = []
 
     for name, param in model.named_parameters():
+        name_l = name.lower()
         if (param.ndim == 2 and 
             'token_embedding' not in name and 
             'norm' not in name and 
             param.requires_grad):
             muon_params.append(param)
         else:
-            adamw_params.append(param)
+            # Standard no-decay set: embeddings, norms, and 1D params (bias/scale).
+            if (
+                param.ndim < 2
+                or "norm" in name_l
+                or "embedding" in name_l
+                or name_l.endswith(".bias")
+            ):
+                adamw_no_decay_params.append(param)
+            else:
+                adamw_decay_params.append(param)
 
     print(f"  Muon parameters: {sum(p.numel() for p in muon_params):,}")
-    print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+    print(
+        "  AdamW parameters: "
+        f"{sum(p.numel() for p in adamw_decay_params) + sum(p.numel() for p in adamw_no_decay_params):,} "
+        f"(decay={sum(p.numel() for p in adamw_decay_params):,}, no_decay={sum(p.numel() for p in adamw_no_decay_params):,})"
+    )
 
     muon_optimizer = Muon(
         muon_params,
@@ -70,26 +85,44 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     )
 
     adamw_wd_mode = getattr(config, "adamw_weight_decay_mode", "decoupled")
+    adamw_param_groups = []
+    if adamw_decay_params:
+        group = {"params": adamw_decay_params, "weight_decay": config.weight_decay}
+        if adamw_wd_mode == "cautious":
+            group["weight_decay_mode"] = "cautious"
+        adamw_param_groups.append(group)
+    if adamw_no_decay_params:
+        group = {"params": adamw_no_decay_params, "weight_decay": 0.0}
+        if adamw_wd_mode == "cautious":
+            group["weight_decay_mode"] = "none"
+        adamw_param_groups.append(group)
+
     if adamw_wd_mode == "cautious":
-        adamw_optimizer = CautiousAdamW(
-            adamw_params,
-            lr=config.adamw_lr,
-            weight_decay=config.weight_decay,
-            weight_decay_mode="cautious",
-            fused=torch.cuda.is_available(),
-        )
+        use_cautious = config.weight_decay != 0.0 and len(adamw_decay_params) > 0
+        if use_cautious:
+            adamw_optimizer = CautiousAdamW(
+                adamw_param_groups,
+                lr=config.adamw_lr,
+                weight_decay_mode="cautious",
+                fused=torch.cuda.is_available(),
+            )
+        else:
+            # If there are no decayable params, avoid CWD overhead entirely.
+            adamw_optimizer = torch.optim.AdamW(
+                adamw_param_groups,
+                lr=config.adamw_lr,
+                fused=torch.cuda.is_available(),
+            )
     elif adamw_wd_mode == "decoupled":
         adamw_optimizer = torch.optim.AdamW(
-            adamw_params,
+            adamw_param_groups,
             lr=config.adamw_lr,
-            weight_decay=config.weight_decay,
             fused=torch.cuda.is_available(),
         )
     elif adamw_wd_mode == "none":
         adamw_optimizer = torch.optim.AdamW(
-            adamw_params,
+            adamw_param_groups,
             lr=config.adamw_lr,
-            weight_decay=0.0,
             fused=torch.cuda.is_available(),
         )
     else:
