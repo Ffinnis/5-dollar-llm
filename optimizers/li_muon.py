@@ -78,6 +78,8 @@ class LiMuon(torch.optim.Optimizer):
         oversampling: RSVD oversampling parameter s (default: 5)
         ns_steps: Number of Polar Express iterations (default: 5)
         nesterov: Use Nesterov momentum (default: True)
+        num_layers: Number of layers for layer dropping (default: 22)
+        alpha: Layer dropping bias strength (default: 0.5)
     """
     
     def __init__(
@@ -89,6 +91,8 @@ class LiMuon(torch.optim.Optimizer):
         oversampling: int = 5,
         ns_steps: int = 5,
         nesterov: bool = True,
+        num_layers: int = 22,
+        alpha: float = 0.5,
     ):
         defaults = dict(
             lr=lr, 
@@ -100,6 +104,8 @@ class LiMuon(torch.optim.Optimizer):
         )
         super().__init__(params, defaults)
         self._prev_weights: Dict[int, torch.Tensor] = {}
+        self.num_layers = num_layers
+        self.alpha = alpha
     
     def save_prev_weights(self):
         """Save current weights W_t before update for STORM computation."""
@@ -112,8 +118,16 @@ class LiMuon(torch.optim.Optimizer):
         """Return saved previous weights for gradient computation."""
         return self._prev_weights
     
+    def _sample_cutoff(self, progress: float) -> int:
+        """Epoch-shift: bias toward shallow layers early, deep layers late."""
+        b = self.num_layers
+        indices = torch.arange(b, dtype=torch.float32)
+        weights = torch.exp(self.alpha * ((1 - progress) * (b - 1 - indices) + progress * indices))
+        probs = weights / weights.sum()
+        return torch.multinomial(probs, 1).item()
+    
     @torch.no_grad()
-    def step(self, closure=None, prev_grads: Optional[Dict[int, torch.Tensor]] = None):
+    def step(self, closure=None, prev_grads: Optional[Dict[int, torch.Tensor]] = None, progress: float = 0.0):
         """
         Performs a single LiMuon optimization step.
         
@@ -133,6 +147,9 @@ class LiMuon(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
         
+        # Sample layer cutoff for this step
+        cutoff = self._sample_cutoff(progress)
+        
         for group in self.param_groups:
             lr = group["lr"]
             beta = group["momentum"]
@@ -140,6 +157,8 @@ class LiMuon(torch.optim.Optimizer):
             oversampling = group["oversampling"]
             ns_steps = group["ns_steps"]
             nesterov = group["nesterov"]
+            
+            layer_idx = group.get('layer_idx', 0)
             
             for p in group["params"]:
                 if p.grad is None:
@@ -152,6 +171,10 @@ class LiMuon(torch.optim.Optimizer):
                 # Initialize momentum buffer on first step
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(g)
+                
+                # Skip frozen layers (below cutoff) for epoch-shift layer dropping
+                if layer_idx < cutoff:
+                    continue
                 
                 buf = state["momentum_buffer"]
                 
@@ -184,4 +207,4 @@ class LiMuon(torch.optim.Optimizer):
         # Clear previous weights after use
         self._prev_weights.clear()
         
-        return loss
+        return cutoff

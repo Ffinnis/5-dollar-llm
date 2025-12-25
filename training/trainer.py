@@ -72,30 +72,57 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
 
 
 def setup_limuon_optimizer(model: nn.Module, config: BlueberryConfig):
-    """Setup LiMuon optimizer (SVD orthogonalization + STORM + RSVD compression)"""
+    """Setup LiMuon optimizer with per-layer param groups for layer dropping."""
     from optimizers.li_muon import LiMuon
+    import re
     
-    limuon_params = []
+    layer_params = {}  # layer_idx -> list of params
     adamw_params = []
     
     for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+            
         if (param.ndim == 2 and 
             'token_embedding' not in name and 
-            'norm' not in name and 
-            param.requires_grad):
-            limuon_params.append(param)
+            'norm' not in name):
+            # Extract layer index from name (e.g., "layers.5.attn.q_proj.weight")
+            match = re.search(r'layers\.([\d]+)', name)
+            if match:
+                layer_idx = int(match.group(1))
+            else:
+                layer_idx = 0  # Non-layer params go to layer 0
+            
+            if layer_idx not in layer_params:
+                layer_params[layer_idx] = []
+            layer_params[layer_idx].append(param)
         else:
             adamw_params.append(param)
-
-    print(f"  LiMuon parameters: {sum(p.numel() for p in limuon_params):,}")
+    
+    # Create param groups with layer_idx
+    limuon_param_groups = []
+    for layer_idx in sorted(layer_params.keys()):
+        limuon_param_groups.append({
+            'params': layer_params[layer_idx],
+            'layer_idx': layer_idx,
+        })
+    
+    limuon_count = sum(p.numel() for pg in limuon_param_groups for p in pg['params'])
+    print(f"  LiMuon parameters: {limuon_count:,} ({len(limuon_param_groups)} layer groups)")
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
 
+    # If layer dropping is disabled, set alpha=0 (uniform cutoff distribution -> no skipping)
+    enable_drop = getattr(config, 'limuon_enable_drop', False)
+    drop_alpha = getattr(config, 'layer_drop_alpha', 0.5) if enable_drop else 0.0
+    
     limuon_optimizer = LiMuon(
-        limuon_params, 
+        limuon_param_groups, 
         lr=config.muon_lr,
         momentum=config.muon_momentum,
         rank=getattr(config, 'limuon_rank', 8),
         oversampling=getattr(config, 'limuon_oversampling', 5),
+        num_layers=config.n_layers,
+        alpha=drop_alpha,
     )
     adamw_optimizer = torch.optim.AdamW(
         adamw_params,
@@ -283,10 +310,13 @@ def train_model(
                     # Save current weights for next STORM iteration
                     limuon_optimizer.save_prev_weights()
                 
+                # Calculate training progress for layer dropping
+                progress = tokens_seen / config.train_tokens
+                
                 for optimizer in optimizers:
-                    # Pass prev_grads to LiMuon for STORM variance reduction
+                    # Pass prev_grads and progress to LiMuon for STORM + layer dropping
                     if hasattr(optimizer, 'save_prev_weights'):
-                        optimizer.step(prev_grads=prev_grads)
+                        optimizer.step(prev_grads=prev_grads, progress=progress)
                     else:
                         optimizer.step()
                     optimizer.zero_grad()

@@ -34,6 +34,8 @@ class BlueberryConfig:
     use_limuon: bool = False          # Use LiMuon instead of Muon
     limuon_rank: int = 8              # RSVD target rank
     limuon_oversampling: int = 5      # RSVD oversampling parameter
+    limuon_enable_drop: bool = False  # Enable epoch-shift layer dropping
+    layer_drop_alpha: float = 0.5     # Layer dropping bias strength (epoch-shift)
 
     # Evaluation
     eval_every: int = 2000
