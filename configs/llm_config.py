@@ -29,6 +29,11 @@ class BlueberryConfig:
     adamw_lr: float = 0.006
     warmup_ratio: float = 0.0
     schedule_type: str = "constant"
+    
+    # LiMuon parameters (uses muon_lr and muon_momentum)
+    use_limuon: bool = False          # Use LiMuon instead of Muon
+    limuon_rank: int = 8              # RSVD target rank
+    limuon_oversampling: int = 5      # RSVD oversampling parameter
 
     # Evaluation
     eval_every: int = 2000

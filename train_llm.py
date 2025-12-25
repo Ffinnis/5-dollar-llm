@@ -184,6 +184,9 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, help="Override gradient_accumulation_steps")
     parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
+    parser.add_argument("--use_limuon", type=str, default="false", help="Use LiMuon instead of Muon (true/false)")
+    parser.add_argument("--limuon_rank", type=int, help="LiMuon RSVD rank (default: 8)")
+    parser.add_argument("--limuon_oversampling", type=int, help="LiMuon RSVD oversampling (default: 5)")
 
     args = parser.parse_args()
 
@@ -222,6 +225,14 @@ def main():
         config.gradient_accumulation_steps = args.gradient_accumulation_steps
     if args.log_every is not None:
         config.log_every = args.log_every
+    
+    # LiMuon config overrides
+    if args.use_limuon is not None:
+        config.use_limuon = (args.use_limuon.lower() == "true")
+    if args.limuon_rank is not None:
+        config.limuon_rank = args.limuon_rank
+    if args.limuon_oversampling is not None:
+        config.limuon_oversampling = args.limuon_oversampling
     
     use_warmup = (args.warmup.lower() == "true")
 

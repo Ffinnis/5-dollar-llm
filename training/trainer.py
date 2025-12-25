@@ -71,6 +71,42 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     return [muon_optimizer, adamw_optimizer]
 
 
+def setup_limuon_optimizer(model: nn.Module, config: BlueberryConfig):
+    """Setup LiMuon optimizer with hybrid approach (LiMuon + AdamW)"""
+    from optimizers.li_muon import LiMuon
+    
+    limuon_params = []
+    adamw_params = []
+
+    for name, param in model.named_parameters():
+        if (param.ndim == 2 and 
+            'token_embedding' not in name and 
+            'norm' not in name and 
+            param.requires_grad):
+            limuon_params.append(param)
+        else:
+            adamw_params.append(param)
+
+    print(f"  LiMuon parameters: {sum(p.numel() for p in limuon_params):,}")
+    print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+
+    limuon_optimizer = LiMuon(
+        limuon_params, 
+        lr=config.muon_lr,  # Uses same lr as Muon
+        momentum=config.muon_momentum,  # Uses same momentum as Muon
+        rank=getattr(config, 'limuon_rank', 8),
+        oversampling=getattr(config, 'limuon_oversampling', 5),
+    )
+    adamw_optimizer = torch.optim.AdamW(
+        adamw_params,
+        lr=config.adamw_lr,
+        weight_decay=config.weight_decay,
+        fused=torch.cuda.is_available()
+    )
+
+    return [limuon_optimizer, adamw_optimizer]
+
+
 def train_model(
     model: nn.Module,
     config: BlueberryConfig,
@@ -370,7 +406,10 @@ def warmup_compiled_kernels(
     model.train()
     
     # Temporary optimizer to warm up optimizer kernels too
-    temp_optimizers = setup_muon_optimizer(model, config)
+    if getattr(config, 'use_limuon', False):
+        temp_optimizers = setup_limuon_optimizer(model, config)
+    else:
+        temp_optimizers = setup_muon_optimizer(model, config)
     
     warmup_iter = iter(train_loader)
     
@@ -489,7 +528,11 @@ def train_minimal_llm(
     # ============================================
     # 6. Create FRESH optimizers (no accumulated state)
     # ============================================
-    optimizers = setup_muon_optimizer(model, config)
+    if getattr(config, 'use_limuon', False):
+        print("🔬 Using LiMuon optimizer (RSVD + STORM)")
+        optimizers = setup_limuon_optimizer(model, config)
+    else:
+        optimizers = setup_muon_optimizer(model, config)
 
     # ============================================
     # 7. Create FRESH schedulers
