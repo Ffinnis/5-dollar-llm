@@ -187,6 +187,7 @@ def main():
     parser.add_argument("--use_limuon", type=str, default="false", help="Use LiMuon instead of Muon (true/false)")
     parser.add_argument("--limuon_rank", type=int, help="LiMuon RSVD rank (default: 8)")
     parser.add_argument("--limuon_oversampling", type=int, help="LiMuon RSVD oversampling (default: 5)")
+    parser.add_argument("--limuon_enable_drop", type=str, default="false", help="Enable epoch-shift layer dropping (true/false)")
 
     args = parser.parse_args()
 
@@ -233,6 +234,8 @@ def main():
         config.limuon_rank = args.limuon_rank
     if args.limuon_oversampling is not None:
         config.limuon_oversampling = args.limuon_oversampling
+    if args.limuon_enable_drop is not None:
+        config.limuon_enable_drop = (args.limuon_enable_drop.lower() == "true")
     
     use_warmup = (args.warmup.lower() == "true")
 

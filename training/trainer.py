@@ -72,30 +72,48 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
 
 
 def setup_limuon_optimizer(model: nn.Module, config: BlueberryConfig):
-    """Setup LiMuon optimizer with hybrid approach (LiMuon + AdamW)"""
+    """Setup LiMuon optimizer with layer-indexed param groups for epoch-shift dropping"""
     from optimizers.li_muon import LiMuon
+    import re
     
-    limuon_params = []
+    limuon_param_groups = []
     adamw_params = []
-
+    total_limuon_params = 0
+    limuon_param_ids = set()
+    
+    enable_drop = getattr(config, 'limuon_enable_drop', False)
+    
     for name, param in model.named_parameters():
         if (param.ndim == 2 and 
             'token_embedding' not in name and 
             'norm' not in name and 
             param.requires_grad):
-            limuon_params.append(param)
+            # Extract layer index from name (e.g., "transformer_blocks.5.attn...")
+            match = re.search(r'transformer_blocks\.(\d+)\.', name)
+            layer_idx = int(match.group(1)) if match else 0
+            
+            limuon_param_groups.append({
+                'params': [param],
+                'layer_idx': layer_idx
+            })
+            total_limuon_params += param.numel()
+            limuon_param_ids.add(id(param))
         else:
             adamw_params.append(param)
 
-    print(f"  LiMuon parameters: {sum(p.numel() for p in limuon_params):,}")
+    print(f"  LiMuon parameters: {total_limuon_params:,}")
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+    if enable_drop:
+        print(f"  🔄 Epoch-shift layer dropping: ENABLED")
 
     limuon_optimizer = LiMuon(
-        limuon_params, 
-        lr=config.muon_lr,  # Uses same lr as Muon
-        momentum=config.muon_momentum,  # Uses same momentum as Muon
+        limuon_param_groups, 
+        lr=config.muon_lr,
+        momentum=config.muon_momentum,
         rank=getattr(config, 'limuon_rank', 8),
         oversampling=getattr(config, 'limuon_oversampling', 5),
+        num_layers=config.n_layers,
+        enable_drop=enable_drop,
     )
     adamw_optimizer = torch.optim.AdamW(
         adamw_params,
@@ -227,8 +245,18 @@ def train_model(
             # Optimizer step
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                
+                # Training progress for LiMuon epoch-shift layer dropping
+                tokens_per_opt_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
+                total_opt_steps = config.train_tokens // tokens_per_opt_step
+                progress = min(1.0, step / max(1, total_opt_steps))
+                
                 for optimizer in optimizers:
-                    optimizer.step()
+                    # Pass progress to LiMuon for epoch-shift dropping
+                    if hasattr(optimizer, 'enable_drop'):
+                        optimizer.step(progress=progress)
+                    else:
+                        optimizer.step()
                     optimizer.zero_grad()
                 for scheduler in schedulers:
                     scheduler.step()

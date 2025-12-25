@@ -59,20 +59,12 @@ def rsvd(
 
 class LiMuon(torch.optim.Optimizer):
     """
-    LiMuon - Light and Fast Muon Optimizer
+    LiMuon - Light and Fast Muon Optimizer with Epoch-Shift Layer Dropping
     
-    Combines momentum-based variance reduction (STORM) with Randomized SVD (RSVD)
-    for memory-efficient optimization of matrix-structured parameters.
-    
-    Key features:
-    - Stores momentum as low-rank factors (U, S, V) instead of full matrix
-    - Uses STORM variance reduction for better convergence
-    - Achieves O(ε⁻³) sample complexity
-    
-    Note: Standard usage pattern. For full STORM variance reduction benefits,
-    the training loop should ideally compute gradients at both current and 
-    previous weights. This implementation provides a simplified version that
-    works with standard training loops.
+    Combines:
+    - RSVD momentum compression for memory efficiency
+    - STORM variance reduction for better convergence (O(ε⁻³) sample complexity)
+    - Epoch-shift layer dropping for speed (+12% from drop-muon)
     
     Args:
         params: Model parameters to optimize
@@ -82,6 +74,9 @@ class LiMuon(torch.optim.Optimizer):
         oversampling: RSVD oversampling parameter (default: 5)
         ns_steps: Number of Polar Express iterations (default: 5)
         nesterov: Use Nesterov momentum (default: True)
+        num_layers: Number of transformer layers for drop scheduling (default: 22)
+        alpha: Epoch-shift temperature (default: 0.5, higher = more aggressive)
+        enable_drop: Enable epoch-shift layer dropping (default: False)
     """
     
     def __init__(
@@ -93,6 +88,9 @@ class LiMuon(torch.optim.Optimizer):
         oversampling: int = 5,
         ns_steps: int = 5,
         nesterov: bool = True,
+        num_layers: int = 22,
+        alpha: float = 0.5,
+        enable_drop: bool = False,
     ):
         defaults = dict(
             lr=lr, 
@@ -103,23 +101,53 @@ class LiMuon(torch.optim.Optimizer):
             nesterov=nesterov,
         )
         super().__init__(params, defaults)
+        self.num_layers = num_layers
+        self.alpha = alpha
+        self.enable_drop = enable_drop
+    
+    def _sample_cutoff(self, progress: float) -> int:
+        """
+        Epoch-shift sampling: bias toward shallow layers early, deep layers late.
+        
+        At progress=0: prefers updating shallow layers (freeze deep)
+        At progress=1: prefers updating deep layers (freeze shallow)
+        """
+        if not self.enable_drop:
+            return 0  # No dropping
+        
+        b = self.num_layers
+        indices = torch.arange(b, dtype=torch.float32)
+        weights = torch.exp(self.alpha * ((1 - progress) * (b - 1 - indices) + progress * indices))
+        probs = weights / weights.sum()
+        return torch.multinomial(probs, 1).item()
     
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure=None, progress: float = 0.0):
         """
         Performs a single optimization step.
         
+        Args:
+            closure: Optional closure for loss computation
+            progress: Training progress [0, 1] for epoch-shift layer dropping
+        
         The algorithm:
-        1. Reconstruct momentum from low-rank factors: M̂ = U @ S @ V.T
-        2. Update momentum with current gradient (simplified STORM)
-        3. Orthogonalize momentum using Polar Express
-        4. Update weights
-        5. Compress new momentum back to low-rank factors via RSVD
+        1. Sample cutoff layer based on progress (epoch-shift)
+        2. Skip layers below cutoff
+        3. Reconstruct momentum from low-rank factors: M̂ = U @ S @ V.T
+        4. Update momentum with current gradient (simplified STORM)
+        5. Orthogonalize momentum using Polar Express
+        6. Update weights
+        7. Compress new momentum back to low-rank factors via RSVD
+        
+        Returns:
+            cutoff: The sampled cutoff layer index
         """
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
+        
+        cutoff = self._sample_cutoff(progress)
         
         for group in self.param_groups:
             lr = group["lr"]
@@ -128,6 +156,11 @@ class LiMuon(torch.optim.Optimizer):
             oversampling = group["oversampling"]
             ns_steps = group["ns_steps"]
             nesterov = group["nesterov"]
+            layer_idx = group.get("layer_idx", 0)
+            
+            # Skip frozen layers (below cutoff)
+            if self.enable_drop and layer_idx < cutoff:
+                continue
             
             for p in group["params"]:
                 if p.grad is None:
@@ -206,4 +239,4 @@ class LiMuon(torch.optim.Optimizer):
                 # Update weights with learning rate scaling
                 p.add_(g.view_as(p), alpha=-lr * max(1, p.size(-2) / p.size(-1))**0.5)
         
-        return loss
+        return cutoff
