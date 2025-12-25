@@ -15,6 +15,7 @@ from models.llm import MinimalLLM
 from optimizers.muon import Muon
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
+import matplotlib.pyplot as plt
 
 
 class EarlyStopping:
@@ -40,6 +41,76 @@ class EarlyStopping:
                 print(f"   Best loss: {self.best_loss:.4f} at step {self.best_step}")
                 return True
             return False
+
+
+def plot_training_metrics(metrics_history: dict, output_path: Path) -> None:
+    """
+    Plot training metrics and save to file.
+    Creates 4 subplots: Loss vs Time, Loss vs Steps, Accuracy vs Steps, LR Schedule.
+    """
+    plt.style.use('default')
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Training Metrics', fontsize=16, fontweight='bold')
+    
+    steps = metrics_history.get('steps', [])
+    times = metrics_history.get('elapsed_times', [])
+    val_losses = metrics_history.get('val_losses', [])
+    val_accuracies = metrics_history.get('val_accuracies', [])
+    learning_rates = metrics_history.get('learning_rates', [])
+    
+    # Find best loss for annotation
+    if val_losses:
+        best_idx = val_losses.index(min(val_losses))
+        best_loss = val_losses[best_idx]
+        best_time = times[best_idx] if times else 0
+        best_step = steps[best_idx] if steps else 0
+    
+    # Plot 1: Validation Loss vs Time (top-left)
+    ax1 = axes[0, 0]
+    if times and val_losses:
+        ax1.plot(times, val_losses, 'b.-', linewidth=1.5, markersize=4)
+        ax1.scatter([best_time], [best_loss], color='red', s=150, marker='*', zorder=5)
+        ax1.annotate(f'Best: {best_loss:.4f}', xy=(best_time, best_loss), 
+                     xytext=(10, 10), textcoords='offset points', fontsize=10,
+                     color='darkred', fontweight='bold')
+    ax1.set_xlabel('Time (minutes)')
+    ax1.set_ylabel('Validation Loss')
+    ax1.set_title('Validation Loss vs Time')
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Validation Loss vs Steps (top-right)
+    ax2 = axes[0, 1]
+    if steps and val_losses:
+        ax2.plot(steps, val_losses, 'g.-', linewidth=1.5, markersize=4)
+        ax2.scatter([best_step], [best_loss], color='red', s=150, marker='*', zorder=5)
+    ax2.set_xlabel('Training Steps')
+    ax2.set_ylabel('Validation Loss')
+    ax2.set_title('Validation Loss vs Steps')
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Validation Accuracy vs Steps (bottom-left)
+    ax3 = axes[1, 0]
+    if steps and val_accuracies:
+        ax3.plot(steps, val_accuracies, 'm.-', linewidth=1.5, markersize=4)
+    ax3.set_xlabel('Training Steps')
+    ax3.set_ylabel('Validation Accuracy')
+    ax3.set_title('Validation Accuracy vs Steps')
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Learning Rate Schedule (bottom-right)
+    ax4 = axes[1, 1]
+    if steps and learning_rates:
+        ax4.plot(steps, learning_rates, 'orange', linewidth=2)
+    ax4.set_xlabel('Training Steps')
+    ax4.set_ylabel('Learning Rate')
+    ax4.set_title('Learning Rate Schedule')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plot_file = output_path / "metrics_plot.png"
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"   📊 Training plot saved to {plot_file}")
 
 
 
@@ -586,6 +657,9 @@ def train_minimal_llm(
             'config': config,
             'metrics': final_eval,
         }, checkpoint_path)
+        
+        # Generate training plots
+        plot_training_metrics(metrics_history, output_path)
         
     
     # Final Output
