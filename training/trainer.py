@@ -64,11 +64,17 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     # Get cautious flag (default False for backwards compatibility)  
     cautious = getattr(config, 'cautious_weight_decay', False)
     
+    # Use cwd_weight_decay when cautious mode enabled, otherwise standard weight_decay
+    if cautious:
+        wd = getattr(config, 'cwd_weight_decay', 1.5)
+    else:
+        wd = config.weight_decay
+    
     muon_optimizer = Muon(
         muon_params, 
         lr=config.muon_lr, 
         momentum=config.muon_momentum,
-        weight_decay=config.weight_decay,
+        weight_decay=wd,
         cautious=cautious
     )
     
@@ -77,14 +83,14 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
         adamw_optimizer = CautiousAdamW(
             adamw_params,
             lr=config.adamw_lr,
-            weight_decay=config.weight_decay,
+            weight_decay=wd,
             fused=False  # Can't use fused with custom step
         )
     else:
         adamw_optimizer = torch.optim.AdamW(
             adamw_params,
             lr=config.adamw_lr,
-            weight_decay=config.weight_decay,
+            weight_decay=wd,
             fused=torch.cuda.is_available()
         )
 

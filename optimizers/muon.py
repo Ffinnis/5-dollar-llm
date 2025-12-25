@@ -46,9 +46,13 @@ class Muon(torch.optim.Optimizer):
     
     With optional Cautious Weight Decay (CWD): weight decay is only applied
     when the update direction and parameter have the same sign.
+    
+    Scheduled weight decay: effective_wd = lr * weight_decay, so weight decay
+    naturally follows the learning rate schedule. Default wd=1.2 gives 
+    effective_wd ≈ 0.036 at peak lr=0.03.
     """
     def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, 
-                 weight_decay=0.0, cautious=False):
+                 weight_decay=1.2, cautious=False):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
                        weight_decay=weight_decay, cautious=cautious)
         super().__init__(params, defaults)
@@ -79,16 +83,20 @@ class Muon(torch.optim.Optimizer):
                 update = g.view_as(p)
                 scaled_lr = lr * max(1, p.size(-2) / p.size(-1))**0.5
                 
-                # Apply weight decay (potentially cautious)
+                # Apply scheduled weight decay: effective_wd = lr * weight_decay
+                # This naturally follows the LR schedule
                 if weight_decay > 0:
+                    # effective_wd = scaled_lr * weight_decay (scheduled)
+                    effective_wd = scaled_lr * weight_decay
+                    
                     if cautious:
                         # CWD: only apply weight decay when update and param have same sign
                         # mask = I(u_t ⊙ x_t >= 0)
                         mask = (update * p.data >= 0).to(p.dtype)
-                        p.data.add_(mask * p.data, alpha=-weight_decay * scaled_lr)
+                        p.data.add_(mask * p.data, alpha=-effective_wd)
                     else:
-                        # Standard decoupled weight decay
-                        p.data.add_(p.data, alpha=-weight_decay * scaled_lr)
+                        # Standard scheduled decoupled weight decay
+                        p.data.add_(p.data, alpha=-effective_wd)
                 
                 # Apply gradient update
                 p.add_(update, alpha=-scaled_lr)

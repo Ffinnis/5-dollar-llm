@@ -1,23 +1,29 @@
 """
-Cautious AdamW - AdamW with Cautious Weight Decay
+Cautious AdamW - AdamW with Scheduled Cautious Weight Decay
 
 Based on the paper: CWD only applies weight decay when the update direction
 and parameter have the same sign: I(u_t ⊙ x_t >= 0)
+
+Scheduled weight decay: effective_wd = lr * weight_decay, so weight decay
+naturally follows the learning rate schedule.
 """
 import torch
 from torch.optim import Optimizer
 
 
 class CautiousAdamW(Optimizer):
-    """AdamW optimizer with Cautious Weight Decay (CWD).
+    """AdamW optimizer with Scheduled Cautious Weight Decay (CWD).
     
     Weight decay is only applied when the Adam update direction and the
     parameter have the same sign, preventing conflict between weight decay
     and gradient descent.
+    
+    Scheduled: effective_wd = lr * weight_decay, following LR schedule.
+    Default wd=1.2 gives effective_wd ≈ 0.036 at peak lr=0.03.
     """
     
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0.01, fused=False):
+                 weight_decay=1.2, fused=False):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if eps < 0.0:
@@ -79,11 +85,13 @@ class CautiousAdamW(Optimizer):
                 step_size = lr / bias_correction1
                 update = exp_avg / denom
                 
-                # Cautious weight decay: only apply when update and param have same sign
+                # Scheduled Cautious weight decay: effective_wd = lr * weight_decay
+                # Only apply when update and param have same sign
                 if weight_decay > 0:
+                    effective_wd = lr * weight_decay
                     # mask = I(u_t ⊙ x_t >= 0)
                     mask = (update * p.data >= 0).to(p.dtype)
-                    p.data.add_(mask * p.data, alpha=-lr * weight_decay)
+                    p.data.add_(mask * p.data, alpha=-effective_wd)
                 
                 # Apply update
                 p.data.add_(update, alpha=-step_size)

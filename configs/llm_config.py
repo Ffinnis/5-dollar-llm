@@ -35,7 +35,8 @@ class BlueberryConfig:
     eval_steps: int = 100
     
     # Regularization
-    weight_decay: float = 0.2
+    weight_decay: float = 0.2  # Standard weight decay (used when cautious_weight_decay=False)
+    cwd_weight_decay: float = 1.5  # Scheduled CWD multiplier: effective_wd = lr * cwd_wd (≈0.036 at lr=0.024)
     cautious_weight_decay: bool = False  # CWD: only decay when grad & param have same sign
     dropout: float = 0.0
     grad_clip: float = 1.0
