@@ -44,26 +44,57 @@ class EarlyStopping:
 
 
 def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
-    """Setup Muon optimizer with hybrid approach"""
+    """Setup Muon optimizer with hybrid approach (μP-aware if enabled)"""
     muon_params = []
-    adamw_params = []
+    adamw_embed_params = []  # Embeddings: no LR scaling in μP
+    adamw_hidden_params = [] # Hidden layers: LR scaled by 1/m_d in μP
+    
+    # μP width multiplier
+    mup_width_mult = config.d_model / config.mup_base_width if config.use_mup else 1.0
 
     for name, param in model.named_parameters():
-        if (param.ndim == 2 and 
-            'token_embedding' not in name and 
-            'norm' not in name and 
-            param.requires_grad):
+        if not param.requires_grad:
+            continue
+        
+        if param.ndim == 2 and 'token_embedding' not in name and 'norm' not in name:
+            # 2D weight matrices (not embeddings/norms) -> Muon
             muon_params.append(param)
+        elif 'token_embedding' in name:
+            # Embeddings -> AdamW with base LR (no μP scaling)
+            adamw_embed_params.append(param)
         else:
-            adamw_params.append(param)
+            # Norms and other 1D params -> AdamW with scaled LR
+            adamw_hidden_params.append(param)
 
     print(f"  Muon parameters: {sum(p.numel() for p in muon_params):,}")
-    print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+    print(f"  AdamW embed parameters: {sum(p.numel() for p in adamw_embed_params):,}")
+    print(f"  AdamW hidden parameters: {sum(p.numel() for p in adamw_hidden_params):,}")
+    
+    # μP: scale Muon LR for hidden weights by 1/m_d
+    muon_lr = config.muon_lr / mup_width_mult if config.use_mup else config.muon_lr
+    if config.use_mup:
+        print(f"  μP enabled: Muon LR scaled from {config.muon_lr} to {muon_lr:.6f}")
 
-    muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
+    muon_optimizer = Muon(muon_params, lr=muon_lr, momentum=config.muon_momentum)
+    
+    # AdamW with μP-aware parameter groups
+    adamw_param_groups = []
+    if adamw_embed_params:
+        # Embeddings: base LR (no μP scaling)
+        adamw_param_groups.append({
+            'params': adamw_embed_params,
+            'lr': config.adamw_lr,
+        })
+    if adamw_hidden_params:
+        # Hidden params: LR scaled by 1/m_d in μP
+        hidden_lr = config.adamw_lr / mup_width_mult if config.use_mup else config.adamw_lr
+        adamw_param_groups.append({
+            'params': adamw_hidden_params,
+            'lr': hidden_lr,
+        })
+    
     adamw_optimizer = torch.optim.AdamW(
-        adamw_params,
-        lr=config.adamw_lr,
+        adamw_param_groups,
         weight_decay=config.weight_decay,
         fused=torch.cuda.is_available()
     )

@@ -42,6 +42,12 @@ class BlueberryConfig:
     
     # Logging
     log_milestones: Tuple[int, ...] = (100, 500, 1000)
+    
+    # μP (Maximal Update Parameterization)
+    use_mup: bool = False           # Enable μP scaling
+    mup_base_width: int = 256       # Width of proxy model for HP tuning
+    mup_output_mult: float = 1.0    # Output logit multiplier (α_output)
+    mup_input_mult: float = 1.0     # Embedding multiplier (α_input)
 
     def __post_init__(self):
         self.d_k = self.d_model // self.n_heads

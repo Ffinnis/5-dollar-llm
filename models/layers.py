@@ -27,6 +27,7 @@ class MultiHeadAttention(nn.Module):
         max_seq_len: int,
         dropout: float = 0.1,
         n_kv_heads: int | None = None,
+        use_mup_attention: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
@@ -34,6 +35,7 @@ class MultiHeadAttention(nn.Module):
         self.n_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
         self.num_key_value_groups = self.n_heads // self.n_kv_heads
         self.d_k = d_model // n_heads
+        self.use_mup_attention = use_mup_attention
 
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.k_proj = nn.Linear(d_model, self.n_kv_heads * self.d_k, bias=False)
@@ -69,9 +71,30 @@ class MultiHeadAttention(nn.Module):
 
         Q, K, V = Q.transpose(1, 2), K.transpose(1, 2), V.transpose(1, 2)
 
-        attn_output = F.scaled_dot_product_attention(
-            Q, K, V, is_causal=True, dropout_p=self.dropout if self.training else 0.0
-        )
+        if self.use_mup_attention:
+            # μP attention: scale by 1/d_k instead of 1/sqrt(d_k)
+            # This accounts for feature correlations that emerge during training
+            scale = 1.0 / self.d_k
+            attn_weights = torch.matmul(Q, K.transpose(-2, -1)) * scale
+            
+            # Apply causal mask
+            causal_mask = torch.triu(
+                torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device), 
+                diagonal=1
+            )
+            attn_weights = attn_weights.masked_fill(causal_mask, float('-inf'))
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            
+            if self.training and self.dropout > 0:
+                attn_weights = F.dropout(attn_weights, p=self.dropout)
+            
+            attn_output = torch.matmul(attn_weights, V)
+        else:
+            # Standard attention with Flash Attention (1/sqrt(d_k) scaling)
+            attn_output = F.scaled_dot_product_attention(
+                Q, K, V, is_causal=True, dropout_p=self.dropout if self.training else 0.0
+            )
+        
         attn_output = attn_output.transpose(1, 2).reshape(
             batch_size, seq_len, self.d_model
         )
@@ -90,10 +113,13 @@ class TransformerBlock(nn.Module):
         max_seq_len: int,
         dropout: float = 0.1,
         n_kv_heads: int | None = None,
+        use_mup_attention: bool = False,
     ):
         super().__init__()
 
-        self.attention = MultiHeadAttention(d_model, n_heads, max_seq_len, dropout, n_kv_heads)
+        self.attention = MultiHeadAttention(
+            d_model, n_heads, max_seq_len, dropout, n_kv_heads, use_mup_attention
+        )
         self.feed_forward = SquaredReLUFeedForward(d_model, d_ff, dropout)
 
         # Normalization layers

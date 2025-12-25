@@ -184,6 +184,12 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, help="Override gradient_accumulation_steps")
     parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
+    
+    # μP (Maximal Update Parameterization) arguments
+    parser.add_argument("--use_mup", action="store_true", help="Enable μP scaling")
+    parser.add_argument("--mup_base_width", type=int, help="Base width for μP (default: 256)")
+    parser.add_argument("--mup_output_mult", type=float, help="Output logit multiplier")
+    parser.add_argument("--mup_input_mult", type=float, help="Embedding multiplier")
 
     args = parser.parse_args()
 
@@ -222,6 +228,16 @@ def main():
         config.gradient_accumulation_steps = args.gradient_accumulation_steps
     if args.log_every is not None:
         config.log_every = args.log_every
+    
+    # μP config overrides
+    if args.use_mup:
+        config.use_mup = True
+    if args.mup_base_width is not None:
+        config.mup_base_width = args.mup_base_width
+    if args.mup_output_mult is not None:
+        config.mup_output_mult = args.mup_output_mult
+    if args.mup_input_mult is not None:
+        config.mup_input_mult = args.mup_input_mult
     
     use_warmup = (args.warmup.lower() == "true")
 
