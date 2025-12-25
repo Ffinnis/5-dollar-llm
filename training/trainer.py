@@ -13,6 +13,7 @@ from typing import List, Optional, Callable, Dict, Any
 from configs.llm_config import BlueberryConfig
 from models.llm import MinimalLLM
 from optimizers.muon import Muon
+from optimizers.cautious_adamw import CautiousAdamW
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
 
@@ -67,12 +68,34 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
         weight_decay=getattr(config, "muon_weight_decay", 0.0),
         weight_decay_mode=getattr(config, "muon_weight_decay_mode", "none"),
     )
-    adamw_optimizer = torch.optim.AdamW(
-        adamw_params,
-        lr=config.adamw_lr,
-        weight_decay=config.weight_decay,
-        fused=torch.cuda.is_available()
-    )
+
+    adamw_wd_mode = getattr(config, "adamw_weight_decay_mode", "decoupled")
+    if adamw_wd_mode == "cautious":
+        adamw_optimizer = CautiousAdamW(
+            adamw_params,
+            lr=config.adamw_lr,
+            weight_decay=config.weight_decay,
+            weight_decay_mode="cautious",
+            fused=torch.cuda.is_available(),
+        )
+    elif adamw_wd_mode == "decoupled":
+        adamw_optimizer = torch.optim.AdamW(
+            adamw_params,
+            lr=config.adamw_lr,
+            weight_decay=config.weight_decay,
+            fused=torch.cuda.is_available(),
+        )
+    elif adamw_wd_mode == "none":
+        adamw_optimizer = torch.optim.AdamW(
+            adamw_params,
+            lr=config.adamw_lr,
+            weight_decay=0.0,
+            fused=torch.cuda.is_available(),
+        )
+    else:
+        raise ValueError(
+            f"adamw_weight_decay_mode must be one of ['none','decoupled','cautious'], got {adamw_wd_mode!r}"
+        )
 
     return [muon_optimizer, adamw_optimizer]
 

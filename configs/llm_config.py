@@ -36,6 +36,11 @@ class BlueberryConfig:
     
     # Regularization
     weight_decay: float = 0.2
+    # AdamW weight decay mode (applied to non-2D params optimized by AdamW)
+    # - mode="none": no weight decay
+    # - mode="decoupled": standard decoupled weight decay (AdamW-style, default)
+    # - mode="cautious": masked decoupled weight decay (CWD), mask uses first moment (m_t)
+    adamw_weight_decay_mode: str = "decoupled"
     # Muon weight decay (applied to 2D weights optimized by Muon)
     # - mode="none": no weight decay (current default behavior)
     # - mode="decoupled": standard decoupled weight decay (AdamW-style)
