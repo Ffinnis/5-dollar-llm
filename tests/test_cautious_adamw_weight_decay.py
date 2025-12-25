@@ -22,10 +22,9 @@ class TestCautiousAdamWWeightDecay(unittest.TestCase):
 
         p0 = p.detach().clone()
         m_t = grad.clone()
-        mask = torch.signbit(m_t) == torch.signbit(p0)
-        mask |= (m_t == 0) | (p0 == 0)
+        mask = (m_t * p0) >= 0
         expected = p0.clone()
-        expected.addcmul_(p0, mask.to(dtype=p.dtype), value=-0.1 * 1.0)
+        expected.addcmul_(p0, mask, value=-0.1 * 1.0)
         expected.add_(m_t / (m_t.abs() + 1e-8), alpha=-0.1)
 
         opt.step()
@@ -59,9 +58,8 @@ class TestCautiousAdamWWeightDecay(unittest.TestCase):
         with torch.no_grad():
             p0 = p_ref.detach().clone()
             m1 = grad1.mul(1.0 - betas[0])
-            mask1 = torch.signbit(m1) == torch.signbit(p0)
-            mask1 |= (m1 == 0) | (p0 == 0)
-            p_ref.addcmul_(p0, mask1.to(dtype=p_ref.dtype), value=-lr * wd)
+            mask1 = (m1 * p0) >= 0
+            p_ref.addcmul_(p0, mask1, value=-lr * wd)
         ref.step()
         opt.step()
 
@@ -74,9 +72,8 @@ class TestCautiousAdamWWeightDecay(unittest.TestCase):
             exp_avg_prev = ref.state[p_ref]["exp_avg"]
             p0 = p_ref.detach().clone()
             m2 = exp_avg_prev.mul(betas[0]).add(grad2, alpha=1.0 - betas[0])
-            mask2 = torch.signbit(m2) == torch.signbit(p0)
-            mask2 |= (m2 == 0) | (p0 == 0)
-            p_ref.addcmul_(p0, mask2.to(dtype=p_ref.dtype), value=-lr * wd)
+            mask2 = (m2 * p0) >= 0
+            p_ref.addcmul_(p0, mask2, value=-lr * wd)
         ref.step()
         opt.step()
 
@@ -109,4 +106,3 @@ class TestCautiousAdamWWeightDecay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

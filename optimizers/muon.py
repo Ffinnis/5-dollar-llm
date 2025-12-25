@@ -101,11 +101,10 @@ class Muon(torch.optim.Optimizer):
                         p.add_(p, alpha=-effective_lr_wd * wd)
                     elif wd_mode == "cautious":
                         # Masked (cautious) decoupled weight decay:
-                        # apply decay only when the optimizer update and parameter have aligned sign
+                        # apply decay only when u_t ⊙ x_t >= 0 elementwise
                         # (i.e., decay does not oppose the optimizer step).
-                        mask = torch.signbit(g) == torch.signbit(p)
-                        mask |= (g == 0) | (p == 0)
-                        p.addcmul_(p, mask.to(dtype=p.dtype), value=-effective_lr_wd * wd)
+                        mask = (g * p) >= 0
+                        p.addcmul_(p, mask, value=-effective_lr_wd * wd)
                     else:
                         raise RuntimeError(f"Unexpected weight_decay_mode: {wd_mode!r}")
 

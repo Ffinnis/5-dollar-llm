@@ -85,11 +85,8 @@ class CautiousAdamW(torch.optim.AdamW):
                 else:
                     m_t = exp_avg.mul(beta1).add(grad, alpha=1.0 - beta1)
 
-                mask = torch.signbit(m_t) == torch.signbit(p)
-                mask |= (m_t == 0) | (p == 0)
-
-                p.addcmul_(p, mask.to(dtype=p.dtype), value=-lr * wd)
+                mask = (m_t * p) >= 0
+                p.addcmul_(p, mask, value=-lr * wd)
 
         super().step(None)
         return loss
-

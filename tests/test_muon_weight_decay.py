@@ -24,10 +24,9 @@ class TestMuonWeightDecay(unittest.TestCase):
         p0 = p.detach().clone()
         u = zeropower_polar_express(grad, steps=0).to(p.dtype)
 
-        mask = torch.signbit(u) == torch.signbit(p0)
-        mask |= (u == 0) | (p0 == 0)
+        mask = (u * p0) >= 0
         expected = p0.clone()
-        expected.addcmul_(p0, mask.to(dtype=p.dtype), value=-0.1 * 1.0)
+        expected.addcmul_(p0, mask, value=-0.1 * 1.0)
         expected.add_(u, alpha=-0.1)
 
         opt.step()
