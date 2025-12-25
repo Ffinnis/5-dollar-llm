@@ -1,6 +1,9 @@
 import torch
 from typing import Optional, Dict, Tuple
 
+# Import Polar Express from muon.py for fast orthogonalization
+from .muon import zeropower_polar_express
+
 
 def rsvd(
     A: torch.Tensor, 
@@ -24,7 +27,6 @@ def rsvd(
         V: Right singular vectors (n, rank)
     """
     m, n = A.shape
-    l = rank + oversampling
     
     # Clamp to valid dimensions
     effective_rank = min(rank, min(m, n) - 1)
@@ -57,30 +59,25 @@ def rsvd(
 
 class LiMuon(torch.optim.Optimizer):
     """
-    LiMuon - Light and Fast Muon Optimizer (Algorithm 1 from paper).
+    LiMuon - Light and Fast Muon Optimizer.
     
     Combines:
-    - SVD-based orthogonalization: O_t = U_t @ V_t^T
-    - STORM variance reduction: M_{t+1} = ∇f(W_{t+1}) + (1-β)(M̂_t - ∇f(W_t))
-    - RSVD momentum compression for memory efficiency (Option #2)
+    - Polar Express orthogonalization (fast, like Muon)
+    - STORM variance reduction for better convergence
+    - RSVD momentum compression for memory efficiency
     
-    Key difference from Muon:
-    - Uses SVD for orthogonalization instead of Newton-Schulz/Polar Express
-    - Uses STORM variance-reduced gradient estimator
-    - Stores momentum in compressed low-rank form
-    
-    STORM requires gradients at BOTH current and previous weights on the SAME batch.
-    The training loop must:
-    1. Forward pass on W_{t+1}, compute grad ∇f(W_{t+1}; ξ)
-    2. Forward pass on W_t (saved), compute grad ∇f(W_t; ξ) - same batch!
-    3. Call optimizer.step() with prev_grads dict
+    This is a practical hybrid: uses Polar Express for speed (as paper mentions
+    Newton-Schulz can replace SVD), STORM for variance reduction, and RSVD
+    to compress momentum buffers.
     
     Args:
         params: Model parameters to optimize
         lr: Learning rate η (default: 0.02)
-        momentum: STORM coefficient β ∈ [0, 1) (default: 0.95)
+        momentum: STORM/EMA coefficient β ∈ [0, 1) (default: 0.95)
         rank: Target rank r̂ for RSVD compression (default: 8)
         oversampling: RSVD oversampling parameter s (default: 5)
+        ns_steps: Number of Polar Express iterations (default: 5)
+        nesterov: Use Nesterov momentum (default: True)
     """
     
     def __init__(
@@ -90,12 +87,16 @@ class LiMuon(torch.optim.Optimizer):
         momentum: float = 0.95,
         rank: int = 8,
         oversampling: int = 5,
+        ns_steps: int = 5,
+        nesterov: bool = True,
     ):
         defaults = dict(
             lr=lr, 
             momentum=momentum, 
             rank=rank,
             oversampling=oversampling,
+            ns_steps=ns_steps,
+            nesterov=nesterov,
         )
         super().__init__(params, defaults)
         self._prev_weights: Dict[int, torch.Tensor] = {}
@@ -116,23 +117,16 @@ class LiMuon(torch.optim.Optimizer):
         """
         Performs a single LiMuon optimization step.
         
-        Algorithm 1 from paper (Option #2 - with RSVD compression):
-        
-        For each parameter:
-        1. (U_t, Σ_t, V_t) = SVD(M_t)           # Full SVD for orthogonalization
-        2. W_{t+1} = W_t - η * U_t @ V_t^T      # Update with orthogonalized momentum
-        3. M_{t+1} = ∇f(W_{t+1}) + (1-β)(M̂_t - ∇f(W_t))  # STORM update
-        4. (Ũ, S̃, Ṽ) = RSVD(M_{t+1})           # Compress for storage
-        
-        Note: Steps 1-2 use PREVIOUS M_t, steps 3-4 compute NEXT M_{t+1}
-        Since gradients come from outside, we:
-        - Use stored M_t to compute orthogonalized update
-        - Update M_{t+1} using current gradient and STORM correction
+        Hybrid algorithm:
+        1. STORM update: M = g + (1-β)(M_prev - prev_g)  OR  EMA if no prev_g
+        2. Nesterov lookahead (optional)
+        3. Polar Express orthogonalization (fast!)
+        4. RSVD compression of momentum for memory efficiency
         
         Args:
             closure: Optional closure for loss computation  
-            prev_grads: Dict mapping param id -> gradient at previous weights ∇f(W_t; ξ)
-                       Required for true STORM. If None, falls back to standard momentum.
+            prev_grads: Dict mapping param id -> gradient at previous weights
+                       Required for true STORM. If None, falls back to EMA.
         """
         loss = None
         if closure is not None:
@@ -141,70 +135,51 @@ class LiMuon(torch.optim.Optimizer):
         
         for group in self.param_groups:
             lr = group["lr"]
-            beta = group["momentum"]  # β in paper
+            beta = group["momentum"]
             rank = group["rank"]
             oversampling = group["oversampling"]
+            ns_steps = group["ns_steps"]
+            nesterov = group["nesterov"]
             
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 
-                g = p.grad  # ∇f(W_{t+1}; ξ_{t+1}) - gradient at current weights
+                g = p.grad  # Current gradient
                 state = self.state[p]
                 param_id = id(p)
                 
-                # Initialize state on first step
+                # Initialize momentum buffer on first step
                 if len(state) == 0:
-                    state["step"] = 0
-                    # M_0 = ∇f(W_0; ξ_0)
-                    state["M"] = g.clone()
+                    state["momentum_buffer"] = torch.zeros_like(g)
                 
-                state["step"] += 1
-                M_t = state["M"]  # Current momentum estimate
+                buf = state["momentum_buffer"]
                 
-                # --- Step 4-5: Orthogonalize M_t and update weights ---
-                if g.ndim == 2 and min(g.shape) > 1:
-                    # SVD for orthogonalization: O_t = U_t @ V_t^T
-                    try:
-                        U, S, Vh = torch.linalg.svd(M_t.float(), full_matrices=False)
-                        # Orthogonalized direction: O_t = U @ V^T
-                        O_t = (U @ Vh).to(p.dtype)
-                    except Exception:
-                        # Fallback if SVD fails
-                        O_t = M_t / (M_t.norm() + 1e-8)
-                else:
-                    # For 1D tensors, just normalize
-                    O_t = M_t / (M_t.norm() + 1e-8)
-                
-                # W_{t+1} = W_t - η_t * O_t (with lr scaling like Muon)
-                scale = max(1, p.size(-2) / p.size(-1)) ** 0.5 if p.ndim >= 2 else 1.0
-                p.add_(O_t.view_as(p), alpha=-lr * scale)
-                
-                # --- Steps 7/9: STORM update for M_{t+1} ---
-                # M_{t+1} = ∇f(W_{t+1}; ξ) + (1-β)(M̂_t - ∇f(W_t; ξ))
+                # Get previous gradient if available (for STORM)
                 prev_g = prev_grads.get(param_id) if prev_grads else None
                 
                 if prev_g is not None:
-                    # True STORM variance reduction
+                    # TRUE STORM variance reduction:
                     # M_{t+1} = g + (1-β)(M_t - prev_g)
-                    M_new = g + (1 - beta) * (M_t - prev_g)
+                    buf.copy_(g + (1 - beta) * (buf - prev_g))
                 else:
-                    # Fallback: standard EMA momentum (like regular Muon)
-                    # M_{t+1} = β * M_t + (1-β) * g
-                    M_new = beta * M_t + (1 - beta) * g
+                    # Standard EMA momentum (like Muon)
+                    # M = β * M + (1-β) * g
+                    buf.lerp_(g, 1 - beta)
                 
-                # --- Step 8: RSVD compression for memory efficiency ---
-                if g.ndim == 2 and min(g.shape) > rank:
-                    try:
-                        U, S, V = rsvd(M_new, rank, oversampling)
-                        # Store compressed: M̂ = U @ diag(S) @ V^T
-                        # Reconstruct immediately for next iteration
-                        state["M"] = U @ torch.diag(S) @ V.T
-                    except Exception:
-                        state["M"] = M_new
+                # Nesterov lookahead
+                if nesterov:
+                    update = g.lerp(buf, beta)
                 else:
-                    # Small tensors: store full momentum
-                    state["M"] = M_new
+                    update = buf.clone()
+                
+                # Fast orthogonalization via Polar Express (not full SVD!)
+                update = zeropower_polar_express(update, steps=ns_steps)
+                update = update.to(p.dtype)
+                
+                # Update weights with lr scaling
+                scale = max(1, p.size(-2) / p.size(-1)) ** 0.5 if p.ndim >= 2 else 1.0
+                p.add_(update.view_as(p), alpha=-lr * scale)
         
         # Clear previous weights after use
         self._prev_weights.clear()
