@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 # Import Polar Express from muon.py for orthogonalization
 from .muon import zeropower_polar_express
@@ -30,6 +30,12 @@ def rsvd(
     m, n = A.shape
     l = rank + oversampling
     
+    # Clamp rank to matrix dimensions
+    effective_rank = min(rank, min(m, n) - 1)
+    if effective_rank < 1:
+        effective_rank = 1
+    l = effective_rank + oversampling
+    
     # Generate random Gaussian matrix for sketching
     Omega = torch.randn(n, l, device=A.device, dtype=A.dtype)
     
@@ -50,21 +56,28 @@ def rsvd(
     V = Vh.T  # (n, min(l, n))
     
     # Truncate to target rank
-    U = U[:, :rank]
-    S = S[:rank]
-    V = V[:, :rank]
+    U = U[:, :effective_rank]
+    S = S[:effective_rank]
+    V = V[:, :effective_rank]
     
     return U, S, V
 
 
 class LiMuon(torch.optim.Optimizer):
     """
-    LiMuon - Light and Fast Muon Optimizer with Epoch-Shift Layer Dropping
+    LiMuon - Light and Fast Muon Optimizer with TRUE STORM Variance Reduction
     
     Combines:
     - RSVD momentum compression for memory efficiency
-    - STORM variance reduction for better convergence (O(ε⁻³) sample complexity)
-    - Epoch-shift layer dropping for speed (+12% from drop-muon)
+    - TRUE STORM variance reduction: M = ∇f(W_new) + (1-β)(M̂ - ∇f(W_old))
+    - Epoch-shift layer dropping for speed (optional)
+    
+    STORM requires computing gradients at BOTH current and previous weights
+    on the SAME batch of data. The training loop must:
+    1. Compute grad at current weights
+    2. Temporarily restore previous weights  
+    3. Compute grad at previous weights (same batch)
+    4. Call optimizer.step() with prev_grads
     
     Args:
         params: Model parameters to optimize
@@ -75,7 +88,7 @@ class LiMuon(torch.optim.Optimizer):
         ns_steps: Number of Polar Express iterations (default: 5)
         nesterov: Use Nesterov momentum (default: True)
         num_layers: Number of transformer layers for drop scheduling (default: 22)
-        alpha: Epoch-shift temperature (default: 0.5, higher = more aggressive)
+        alpha: Epoch-shift temperature (default: 0.5)
         enable_drop: Enable epoch-shift layer dropping (default: False)
     """
     
@@ -104,16 +117,12 @@ class LiMuon(torch.optim.Optimizer):
         self.num_layers = num_layers
         self.alpha = alpha
         self.enable_drop = enable_drop
+        self._prev_weights: Dict[int, torch.Tensor] = {}  # Store previous weights by param id
     
     def _sample_cutoff(self, progress: float) -> int:
-        """
-        Epoch-shift sampling: bias toward shallow layers early, deep layers late.
-        
-        At progress=0: prefers updating shallow layers (freeze deep)
-        At progress=1: prefers updating deep layers (freeze shallow)
-        """
+        """Epoch-shift sampling: bias toward shallow layers early, deep layers late."""
         if not self.enable_drop:
-            return 0  # No dropping
+            return 0
         
         b = self.num_layers
         indices = torch.arange(b, dtype=torch.float32)
@@ -121,26 +130,36 @@ class LiMuon(torch.optim.Optimizer):
         probs = weights / weights.sum()
         return torch.multinomial(probs, 1).item()
     
+    def save_prev_weights(self):
+        """Save current weights as previous weights for STORM computation."""
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.requires_grad:
+                    self._prev_weights[id(p)] = p.data.clone()
+    
+    def get_prev_weights(self) -> Dict[int, torch.Tensor]:
+        """Return saved previous weights."""
+        return self._prev_weights
+    
     @torch.no_grad()
-    def step(self, closure=None, progress: float = 0.0):
+    def step(self, closure=None, progress: float = 0.0, prev_grads: Optional[Dict[int, torch.Tensor]] = None):
         """
-        Performs a single optimization step.
+        Performs a single optimization step with TRUE STORM variance reduction.
         
         Args:
             closure: Optional closure for loss computation
             progress: Training progress [0, 1] for epoch-shift layer dropping
+            prev_grads: Dict mapping param id -> gradient at previous weights
+                       Required for true STORM. If None, falls back to simplified update.
         
-        The algorithm:
-        1. Sample cutoff layer based on progress (epoch-shift)
-        2. Skip layers below cutoff
-        3. Reconstruct momentum from low-rank factors: M̂ = U @ S @ V.T
-        4. Update momentum with current gradient (simplified STORM)
-        5. Orthogonalize momentum using Polar Express
-        6. Update weights
-        7. Compress new momentum back to low-rank factors via RSVD
+        The TRUE STORM algorithm:
+        1. M_new = ∇f(W_new; batch) + (1-β) * (M̂ - ∇f(W_old; batch))
+        2. Orthogonalize M_new using Polar Express
+        3. Update weights: W = W - lr * orthogonalized(M_new)
+        4. Compress M_new to low-rank via RSVD
         
         Returns:
-            cutoff: The sampled cutoff layer index
+            cutoff: The sampled cutoff layer index (for dropping stats)
         """
         loss = None
         if closure is not None:
@@ -166,13 +185,15 @@ class LiMuon(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 
-                g = p.grad
+                g = p.grad  # ∇f(W_new; batch)
                 state = self.state[p]
+                param_id = id(p)
+                
+                # Get previous gradient if available (for true STORM)
+                prev_g = prev_grads.get(param_id) if prev_grads else None
                 
                 # Initialize state on first step
                 if len(state) == 0:
-                    # For first step, store momentum as full matrix temporarily
-                    # then compress it
                     state["step"] = 0
                     state["use_lowrank"] = False
                     state["momentum_buffer"] = torch.zeros_like(g)
@@ -181,13 +202,18 @@ class LiMuon(torch.optim.Optimizer):
                 
                 if not state["use_lowrank"]:
                     # First few steps: use full momentum buffer
-                    # Switch to low-rank after sufficient information is gathered
                     buf = state["momentum_buffer"]
-                    buf.lerp_(g, 1 - momentum)
+                    
+                    if prev_g is not None:
+                        # TRUE STORM: M = g + (1-β)(M̂ - prev_g)
+                        storm_correction = buf - prev_g
+                        buf.copy_(g + (1 - momentum) * storm_correction)
+                    else:
+                        # Fallback: standard momentum
+                        buf.lerp_(g, 1 - momentum)
                     
                     # After accumulating some momentum, switch to low-rank
                     if state["step"] >= 3 and g.ndim == 2:
-                        # Compress to low-rank
                         try:
                             U, S, V = rsvd(buf, rank, oversampling)
                             state["U"] = U
@@ -196,7 +222,6 @@ class LiMuon(torch.optim.Optimizer):
                             state["use_lowrank"] = True
                             del state["momentum_buffer"]
                         except Exception:
-                            # If RSVD fails (e.g., rank too high), keep dense
                             pass
                     
                     # Apply Nesterov momentum
@@ -205,16 +230,19 @@ class LiMuon(torch.optim.Optimizer):
                     else:
                         g = buf.clone()
                 else:
-                    # Low-rank path: reconstruct, update, compress
+                    # Low-rank path: reconstruct, STORM update, compress
                     U, S, V = state["U"], state["S"], state["V"]
                     
                     # Reconstruct momentum: M̂ = U @ diag(S) @ V.T
                     M_hat = U @ torch.diag(S) @ V.T
                     
-                    # Update momentum (simplified STORM without previous gradient)
-                    # M_new = g + (1 - β) * M̂
-                    # This is equivalent to: M_new.lerp_(g, 1 - momentum) starting from M̂
-                    M_new = g + (1 - momentum) * M_hat
+                    if prev_g is not None:
+                        # TRUE STORM: M = g + (1-β)(M̂ - prev_g)
+                        storm_correction = M_hat - prev_g
+                        M_new = g + (1 - momentum) * storm_correction
+                    else:
+                        # Fallback: simplified update
+                        M_new = g + (1 - momentum) * M_hat
                     
                     # Compress back to low-rank
                     try:
@@ -223,7 +251,6 @@ class LiMuon(torch.optim.Optimizer):
                         state["S"] = S
                         state["V"] = V
                     except Exception:
-                        # If RSVD fails, use uncompressed update
                         pass
                     
                     # Apply Nesterov momentum
@@ -238,5 +265,8 @@ class LiMuon(torch.optim.Optimizer):
                 
                 # Update weights with learning rate scaling
                 p.add_(g.view_as(p), alpha=-lr * max(1, p.size(-2) / p.size(-1))**0.5)
+        
+        # Clear previous weights after use
+        self._prev_weights.clear()
         
         return cutoff

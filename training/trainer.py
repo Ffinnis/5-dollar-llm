@@ -251,9 +251,66 @@ def train_model(
                 total_opt_steps = config.train_tokens // tokens_per_opt_step
                 progress = min(1.0, step / max(1, total_opt_steps))
                 
+                # Check if any optimizer is LiMuon (needs STORM)
+                limuon_optimizer = None
                 for optimizer in optimizers:
-                    # Pass progress to LiMuon for epoch-shift dropping
-                    if hasattr(optimizer, 'enable_drop'):
+                    if hasattr(optimizer, 'save_prev_weights'):
+                        limuon_optimizer = optimizer
+                        break
+                
+                prev_grads = None
+                if limuon_optimizer is not None:
+                    # TRUE STORM: compute gradient at previous weights
+                    prev_weights = limuon_optimizer.get_prev_weights()
+                    
+                    if prev_weights:  # Skip on first step (no prev weights yet)
+                        # Store current gradients
+                        current_grads = {id(p): p.grad.clone() for p in model.parameters() if p.grad is not None}
+                        
+                        # Temporarily restore previous weights
+                        current_weights = {}
+                        for p in model.parameters():
+                            pid = id(p)
+                            if pid in prev_weights:
+                                current_weights[pid] = p.data.clone()
+                                p.data.copy_(prev_weights[pid])
+                        
+                        # Zero gradients and recompute at previous weights
+                        for optimizer in optimizers:
+                            optimizer.zero_grad()
+                        
+                        # Forward pass at previous weights (same batch)
+                        with autocast('cuda', dtype=torch.bfloat16) if config.use_amp else torch.enable_grad():
+                            logits_prev = model(x)
+                            shift_labels_prev = torch.full_like(y, -100)
+                            shift_labels_prev[:, :-1] = y[:, 1:]
+                            ce_loss_prev = F.cross_entropy(
+                                logits_prev.view(-1, config.vocab_size),
+                                shift_labels_prev.view(-1),
+                                ignore_index=-100
+                            )
+                            loss_prev = ce_loss_prev / config.gradient_accumulation_steps
+                        loss_prev.backward()
+                        
+                        # Collect prev_grads
+                        prev_grads = {id(p): p.grad.clone() for p in model.parameters() if p.grad is not None}
+                        
+                        # Restore current weights and gradients
+                        for p in model.parameters():
+                            pid = id(p)
+                            if pid in current_weights:
+                                p.data.copy_(current_weights[pid])
+                            if pid in current_grads:
+                                p.grad = current_grads[pid]
+                    
+                    # Save current weights for next STORM iteration
+                    limuon_optimizer.save_prev_weights()
+                
+                for optimizer in optimizers:
+                    # Pass progress and prev_grads to LiMuon for STORM
+                    if hasattr(optimizer, 'save_prev_weights'):
+                        optimizer.step(progress=progress, prev_grads=prev_grads)
+                    elif hasattr(optimizer, 'enable_drop'):
                         optimizer.step(progress=progress)
                     else:
                         optimizer.step()
