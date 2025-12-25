@@ -42,14 +42,24 @@ def zeropower_polar_express(G:torch.Tensor, steps: int = 5,):
 
 
 class Muon(torch.optim.Optimizer):
-    """Muon - MomentUm Orthogonalized by Polar Express / Newton Schulz"""
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+    """Muon - MomentUm Orthogonalized by Polar Express / Newton Schulz
+    
+    With optional Cautious Weight Decay (CWD): weight decay is only applied
+    when the update direction and parameter have the same sign.
+    """
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, 
+                 weight_decay=0.0, cautious=False):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
+                       weight_decay=weight_decay, cautious=cautious)
         super().__init__(params, defaults)
 
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            cautious = group["cautious"]
+            
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -63,6 +73,22 @@ class Muon(torch.optim.Optimizer):
                 buf = state["momentum_buffer"]
                 buf.lerp_(g, 1 - group["momentum"])
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                g = zeropower_polar_express(g, steps=group["ns_steps"]) # steps are 5 for both ns and pe
+                g = zeropower_polar_express(g, steps=group["ns_steps"])
                 g = g.to(p.dtype)
-                p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+                
+                update = g.view_as(p)
+                scaled_lr = lr * max(1, p.size(-2) / p.size(-1))**0.5
+                
+                # Apply weight decay (potentially cautious)
+                if weight_decay > 0:
+                    if cautious:
+                        # CWD: only apply weight decay when update and param have same sign
+                        # mask = I(u_t ⊙ x_t >= 0)
+                        mask = (update * p.data >= 0).to(p.dtype)
+                        p.data.add_(mask * p.data, alpha=-weight_decay * scaled_lr)
+                    else:
+                        # Standard decoupled weight decay
+                        p.data.add_(p.data, alpha=-weight_decay * scaled_lr)
+                
+                # Apply gradient update
+                p.add_(update, alpha=-scaled_lr)

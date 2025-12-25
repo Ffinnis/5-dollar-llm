@@ -36,6 +36,7 @@ class BlueberryConfig:
     
     # Regularization
     weight_decay: float = 0.2
+    cautious_weight_decay: bool = False  # CWD: only decay when grad & param have same sign
     dropout: float = 0.0
     grad_clip: float = 1.0
     use_amp: bool = True

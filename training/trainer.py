@@ -13,6 +13,7 @@ from typing import List, Optional, Callable, Dict, Any
 from configs.llm_config import BlueberryConfig
 from models.llm import MinimalLLM
 from optimizers.muon import Muon
+from optimizers.cautious_adamw import CautiousAdamW
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
 
@@ -60,13 +61,32 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     print(f"  Muon parameters: {sum(p.numel() for p in muon_params):,}")
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
 
-    muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=config.muon_momentum)
-    adamw_optimizer = torch.optim.AdamW(
-        adamw_params,
-        lr=config.adamw_lr,
+    # Get cautious flag (default False for backwards compatibility)  
+    cautious = getattr(config, 'cautious_weight_decay', False)
+    
+    muon_optimizer = Muon(
+        muon_params, 
+        lr=config.muon_lr, 
+        momentum=config.muon_momentum,
         weight_decay=config.weight_decay,
-        fused=torch.cuda.is_available()
+        cautious=cautious
     )
+    
+    # For AdamW with CWD, we use a custom wrapper
+    if cautious:
+        adamw_optimizer = CautiousAdamW(
+            adamw_params,
+            lr=config.adamw_lr,
+            weight_decay=config.weight_decay,
+            fused=False  # Can't use fused with custom step
+        )
+    else:
+        adamw_optimizer = torch.optim.AdamW(
+            adamw_params,
+            lr=config.adamw_lr,
+            weight_decay=config.weight_decay,
+            fused=torch.cuda.is_available()
+        )
 
     return [muon_optimizer, adamw_optimizer]
 
