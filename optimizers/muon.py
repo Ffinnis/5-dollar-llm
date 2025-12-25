@@ -89,21 +89,24 @@ class Muon(torch.optim.Optimizer):
                 g = g.to(p.dtype)
 
                 lr_scale = max(1.0, p.size(-2) / p.size(-1)) ** 0.5
-                effective_lr = group["lr"] * lr_scale
+                # Muon uses an extra aspect-ratio scaling on the update step; weight decay should
+                # follow the scheduled group lr (ηt) rather than this optimizer-specific scaling.
+                effective_lr_update = group["lr"] * lr_scale
+                effective_lr_wd = group["lr"]
 
                 wd = group.get("weight_decay", 0.0)
                 wd_mode = group.get("weight_decay_mode", "none")
                 if wd != 0.0 and wd_mode != "none":
                     if wd_mode == "decoupled":
-                        p.add_(p, alpha=-effective_lr * wd)
+                        p.add_(p, alpha=-effective_lr_wd * wd)
                     elif wd_mode == "cautious":
                         # Masked (cautious) decoupled weight decay:
                         # apply decay only when the optimizer update and parameter have aligned sign
                         # (i.e., decay does not oppose the optimizer step).
                         mask = torch.signbit(g) == torch.signbit(p)
                         mask |= (g == 0) | (p == 0)
-                        p.addcmul_(p, mask.to(dtype=p.dtype), value=-effective_lr * wd)
+                        p.addcmul_(p, mask.to(dtype=p.dtype), value=-effective_lr_wd * wd)
                     else:
                         raise RuntimeError(f"Unexpected weight_decay_mode: {wd_mode!r}")
 
-                p.add_(g.view_as(p), alpha=-effective_lr)
+                p.add_(g.view_as(p), alpha=-effective_lr_update)

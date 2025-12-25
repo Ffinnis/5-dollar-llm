@@ -92,7 +92,23 @@ class TestMuonWeightDecay(unittest.TestCase):
         opt2.step()
         torch.testing.assert_close(p2.detach(), torch.full_like(p2, 0.8), rtol=0, atol=1e-6)
 
+    def test_weight_decay_not_scaled_by_aspect_ratio(self):
+        p = torch.nn.Parameter(torch.ones((4, 2), dtype=torch.float32))
+        p.grad = torch.zeros_like(p)
+
+        opt = Muon(
+            [p],
+            lr=0.1,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=0,
+            weight_decay=1.0,
+            weight_decay_mode="decoupled",
+        )
+
+        opt.step()
+        torch.testing.assert_close(p.detach(), torch.full_like(p, 0.9), rtol=0, atol=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()
-
