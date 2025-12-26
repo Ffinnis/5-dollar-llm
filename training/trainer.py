@@ -170,10 +170,20 @@ def train_model(
             # Count tokens in this batch (approx: batch_size * seq_len)
             batch_tokens = x.numel()
 
-            # Forward pass (optimized to avoid large contiguous copies of logits)
+            # Sample cutoff for Drop-Muon gradient truncation BEFORE forward
+            cutoff = None
+            muon_opt = next((o for o in optimizers if isinstance(o, Muon)), None)
+            if muon_opt is not None:
+                tokens_per_opt_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
+                total_opt_steps = max(1, (config.train_tokens + tokens_per_opt_step - 1) // tokens_per_opt_step)
+                opt_step = (step + 1) // config.gradient_accumulation_steps  # 1-indexed
+                progress = min(1.0, (opt_step - 1) / max(1, total_opt_steps - 1))
+                cutoff = muon_opt.sample_cutoff(progress)
+
+            # Forward pass with gradient truncation
             if config.use_amp:
                 with autocast('cuda', dtype=torch.bfloat16):
-                    logits = model(x)
+                    logits = model(x, cutoff=cutoff)
                     # Shift labels instead of logits to save ~3GB VRAM
                     # We set the last token to -100 so cross_entropy ignores it
                     shift_labels = torch.full_like(y, -100)
@@ -187,7 +197,7 @@ def train_model(
                     loss = ce_loss / config.gradient_accumulation_steps
                 loss.backward()
             else:
-                logits = model(x)
+                logits = model(x, cutoff=cutoff)
                 shift_labels = torch.full_like(y, -100)
                 shift_labels[:, :-1] = y[:, 1:]
                 
@@ -203,16 +213,9 @@ def train_model(
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
                 
-                # Training progress for Drop-Muon epoch-shift layer dropping
-                tokens_per_opt_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
-                # `step` counts microbatches; Drop-Muon progress should track optimizer steps.
-                total_opt_steps = max(1, (config.train_tokens + tokens_per_opt_step - 1) // tokens_per_opt_step)
-                opt_step = (step + 1) // config.gradient_accumulation_steps  # 1-indexed
-                progress = min(1.0, (opt_step - 1) / max(1, total_opt_steps - 1))
-                
                 for optimizer in optimizers:
                     if isinstance(optimizer, Muon):
-                        optimizer.step(progress=progress)
+                        optimizer.step(cutoff=cutoff if cutoff is not None else 0)
                     else:
                         optimizer.step()
                     optimizer.zero_grad()

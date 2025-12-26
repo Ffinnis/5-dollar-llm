@@ -50,14 +50,35 @@ class MinimalLLM(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, x):
+    def forward(self, x, cutoff: Optional[int] = None):
+        """
+        Forward pass with optional gradient truncation for Drop-Muon.
+        
+        Args:
+            x: Input token ids
+            cutoff: If provided, truncate gradient flow at this layer index.
+                   Layers 0 to cutoff-1 run without gradient tracking.
+                   Layers cutoff to n_layers-1 run normally with gradients.
+        """
         # Token embeddings
         x = self.token_embedding(x) * math.sqrt(self.config.d_model)
         x = self.position_dropout(x)
 
-        # Pass through transformer blocks
-        for block in self.transformer_blocks:
-            x = block(x)
+        # Pass through transformer blocks with gradient truncation
+        if cutoff is not None and cutoff > 0:
+            # Frozen prefix: no gradients
+            with torch.no_grad():
+                for i in range(cutoff):
+                    x = self.transformer_blocks[i](x)
+            # Detach to cut gradient flow
+            x = x.detach()
+            # Active suffix: with gradients
+            for i in range(cutoff, len(self.transformer_blocks)):
+                x = self.transformer_blocks[i](x)
+        else:
+            # No truncation - standard forward
+            for block in self.transformer_blocks:
+                x = block(x)
 
         # Output projection
         x = self.norm(x)

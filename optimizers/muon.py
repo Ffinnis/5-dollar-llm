@@ -50,7 +50,7 @@ class Muon(torch.optim.Optimizer):
         self.num_layers = num_layers
         self.alpha = alpha
 
-    def _sample_cutoff(self, progress: float) -> int:
+    def sample_cutoff(self, progress: float) -> int:
         """Epoch-shift: bias toward shallow layers early, deep layers late"""
         b = self.num_layers
         indices = torch.arange(b, dtype=torch.float32)
@@ -59,11 +59,14 @@ class Muon(torch.optim.Optimizer):
         return torch.multinomial(probs, 1).item()
 
     @torch.no_grad()
-    def step(self, progress: float = 0.0):
-        cutoff = self._sample_cutoff(progress)
-
+    def step(self, cutoff: int = 0):
+        """Update only active layers (>= cutoff). Frozen layers have no grad due to truncation."""
         for group in self.param_groups:
             layer_idx = group.get('layer_idx', 0)
+            
+            # Skip frozen layers - they have no grad due to gradient truncation
+            if layer_idx < cutoff:
+                continue
 
             for p in group["params"]:
                 if p.grad is None:
@@ -75,15 +78,13 @@ class Muon(torch.optim.Optimizer):
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
 
-                # Always update momentum for all layers
+                # Momentum update for active layers
                 buf = state["momentum_buffer"]
                 buf.lerp_(g, 1 - group["momentum"])
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 
-                # Orthogonalize only active layers, but always update weights
-                if layer_idx >= cutoff:
-                    g = zeropower_polar_express(g, steps=group["ns_steps"])
-                
+                # Orthogonalize and update
+                g = zeropower_polar_express(g, steps=group["ns_steps"])
                 g = g.to(p.dtype)
                 p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1)) ** 0.5)
 
