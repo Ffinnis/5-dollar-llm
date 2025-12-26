@@ -73,12 +73,14 @@ class MuonAll(torch.optim.Optimizer):
     MuonAll - Modified Muon that handles ALL parameters.
     
     For params with use_muon=True: applies Muon (momentum + Newton-Schulz)
-    For params with use_muon=False: applies simple momentum with lr_1d
+    For params with use_muon=False: applies Adam-style update (momentum + RMSprop scaling)
     
     This removes the need for a separate AdamW optimizer.
     """
-    def __init__(self, params, lr=0.02, lr_1d=0.006, momentum=0.95, nesterov=True, ns_steps=5):
-        defaults = dict(lr=lr, lr_1d=lr_1d, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, use_muon=True)
+    def __init__(self, params, lr=0.02, lr_1d=0.006, momentum=0.95, beta2=0.999, eps=1e-8, 
+                 weight_decay=0.0, nesterov=True, ns_steps=5):
+        defaults = dict(lr=lr, lr_1d=lr_1d, momentum=momentum, beta2=beta2, eps=eps,
+                        weight_decay=weight_decay, nesterov=nesterov, ns_steps=ns_steps, use_muon=True)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -95,18 +97,39 @@ class MuonAll(torch.optim.Optimizer):
 
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
+                    if not use_muon:
+                        state["v"] = torch.zeros_like(g)  # RMSprop variance
+                        state["step"] = 0
 
                 buf = state["momentum_buffer"]
                 buf.lerp_(g, 1 - group["momentum"])
                 
-                # Apply Nesterov momentum
-                g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                
                 # Apply Newton-Schulz only for muon params (2D matrices, not embedding/norm)
                 if use_muon and p.ndim >= 2:
+                    # Nesterov momentum
+                    g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                     g = zeropower_polar_express(g, steps=group["ns_steps"])
                     g = g.to(p.dtype)
                     p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
                 else:
-                    # Simple momentum update with lr_1d
-                    p.add_(g, alpha=-group["lr_1d"])
+                    # Adam-style update for non-muon params
+                    state["step"] += 1
+                    v = state["v"]
+                    
+                    # Update second moment (RMSprop)
+                    v.mul_(group["beta2"]).addcmul_(g, g, value=1 - group["beta2"])
+                    
+                    # Bias correction
+                    bias_correction1 = 1 - group["momentum"] ** state["step"]
+                    bias_correction2 = 1 - group["beta2"] ** state["step"]
+                    
+                    # Corrected moments
+                    m_hat = buf / bias_correction1
+                    v_hat = v / bias_correction2
+                    
+                    # Weight decay (decoupled, like AdamW)
+                    if group["weight_decay"] > 0:
+                        p.add_(p, alpha=-group["lr_1d"] * group["weight_decay"])
+                    
+                    # Adam update
+                    p.addcdiv_(m_hat, v_hat.sqrt().add_(group["eps"]), value=-group["lr_1d"])

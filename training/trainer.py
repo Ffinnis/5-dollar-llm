@@ -105,7 +105,8 @@ def setup_muonall_optimizer(model: nn.Module, config: BlueberryConfig):
          {'params': simple_params, 'use_muon': False}],
         lr=config.muon_lr,
         lr_1d=lr_1d,
-        momentum=config.muon_momentum
+        momentum=config.muon_momentum,
+        weight_decay=config.weight_decay
     )
     
     return [muonall_optimizer]
