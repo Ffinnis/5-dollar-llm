@@ -76,24 +76,33 @@ def setup_muonall_optimizer(model: nn.Module, config: BlueberryConfig):
     """
     Setup MuonAll optimizer - single optimizer for ALL parameters.
     
-    MuonAll uses Muon (Newton-Schulz) for 2D params and simple momentum for 1D params.
-    This removes the dependency on AdamW.
+    MuonAll uses Muon (Newton-Schulz) for eligible 2D params and simple momentum 
+    for 1D params + token_embedding + norm (same split as original Muon+AdamW).
     """
-    all_params = [p for p in model.parameters() if p.requires_grad]
+    muon_params = []  # Will use Newton-Schulz
+    simple_params = []  # Will use simple momentum (like AdamW did)
     
-    # Count params by type for logging
-    params_2d = sum(p.numel() for p in all_params if p.ndim == 2)
-    params_1d = sum(p.numel() for p in all_params if p.ndim == 1)
-    params_other = sum(p.numel() for p in all_params if p.ndim not in (1, 2))
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # Same logic as original setup_muon_optimizer
+        if (param.ndim == 2 and 
+            'token_embedding' not in name and 
+            'norm' not in name):
+            muon_params.append(param)
+        else:
+            simple_params.append(param)
+    
+    muon_count = sum(p.numel() for p in muon_params)
+    simple_count = sum(p.numel() for p in simple_params)
     
     lr_1d = getattr(config, 'muonall_lr_1d', config.adamw_lr)
-    print(f"  MuonAll 2D parameters: {params_2d:,} (lr={config.muon_lr})")
-    print(f"  MuonAll 1D parameters: {params_1d:,} (lr_1d={lr_1d})")
-    if params_other > 0:
-        print(f"  MuonAll other parameters: {params_other:,}")
+    print(f"  MuonAll Muon params: {muon_count:,} (lr={config.muon_lr})")
+    print(f"  MuonAll simple params: {simple_count:,} (lr={lr_1d})")
     
     muonall_optimizer = MuonAll(
-        all_params, 
+        [{'params': muon_params, 'use_muon': True},
+         {'params': simple_params, 'use_muon': False}],
         lr=config.muon_lr,
         lr_1d=lr_1d,
         momentum=config.muon_momentum

@@ -70,30 +70,28 @@ class Muon(torch.optim.Optimizer):
 
 class MuonAll(torch.optim.Optimizer):
     """
-    MuonAll - Modified Muon that handles ALL parameters including 1D.
+    MuonAll - Modified Muon that handles ALL parameters.
     
-    For 2D+ parameters: applies Muon (momentum + Newton-Schulz orthogonalization)
-    For 1D parameters: applies simple momentum update with separate lr_1d
+    For params with use_muon=True: applies Muon (momentum + Newton-Schulz)
+    For params with use_muon=False: applies simple momentum with lr_1d
     
-    This removes the need for a separate AdamW optimizer while avoiding
-    the overhead and instability of orthogonalizing 1D parameters.
+    This removes the need for a separate AdamW optimizer.
     """
     def __init__(self, params, lr=0.02, lr_1d=0.006, momentum=0.95, nesterov=True, ns_steps=5):
-        defaults = dict(lr=lr, lr_1d=lr_1d, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+        defaults = dict(lr=lr, lr_1d=lr_1d, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, use_muon=True)
         super().__init__(params, defaults)
 
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
+            use_muon = group.get('use_muon', True)
+            
             for p in group["params"]:
                 if p.grad is None:
                     continue
 
                 g = p.grad
                 state = self.state[p]
-                
-                # Check if parameter is 1D (bias, layer norm, etc.)
-                is_1d = (p.ndim == 1)
 
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
@@ -104,11 +102,11 @@ class MuonAll(torch.optim.Optimizer):
                 # Apply Nesterov momentum
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 
-                # Only apply Newton-Schulz orthogonalization to 2D+ parameters
-                if not is_1d:
+                # Apply Newton-Schulz only for muon params (2D matrices, not embedding/norm)
+                if use_muon and p.ndim >= 2:
                     g = zeropower_polar_express(g, steps=group["ns_steps"])
                     g = g.to(p.dtype)
                     p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
                 else:
-                    # Simple momentum update for 1D params with separate learning rate
+                    # Simple momentum update with lr_1d
                     p.add_(g, alpha=-group["lr_1d"])
