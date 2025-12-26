@@ -75,16 +75,15 @@ class Muon(torch.optim.Optimizer):
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
 
-                # Always update momentum for all layers (keeps momentum fresh)
+                # Always update momentum for all layers
                 buf = state["momentum_buffer"]
                 buf.lerp_(g, 1 - group["momentum"])
-                
-                # Skip orthogonalization + update for frozen layers (below cutoff)
-                if layer_idx < cutoff:
-                    continue
-
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                g = zeropower_polar_express(g, steps=group["ns_steps"])
+                
+                # Orthogonalize only active layers, but always update weights
+                if layer_idx >= cutoff:
+                    g = zeropower_polar_express(g, steps=group["ns_steps"])
+                
                 g = g.to(p.dtype)
                 p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1)) ** 0.5)
 
