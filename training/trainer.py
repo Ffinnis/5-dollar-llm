@@ -13,7 +13,7 @@ from tqdm import tqdm
 from typing import List, Optional, Callable, Dict, Any
 from configs.llm_config import BlueberryConfig
 from models.llm import MinimalLLM
-from optimizers.muon import Muon
+from optimizers.muon import Muon, MuonAll
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
 
@@ -45,7 +45,7 @@ class EarlyStopping:
 
 
 def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
-    """Setup Muon optimizer with hybrid approach"""
+    """Setup Muon optimizer with hybrid approach (legacy)"""
     muon_params = []
     adamw_params = []
 
@@ -70,6 +70,35 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
     )
 
     return [muon_optimizer, adamw_optimizer]
+
+
+def setup_muonall_optimizer(model: nn.Module, config: BlueberryConfig):
+    """
+    Setup MuonAll optimizer - single optimizer for ALL parameters.
+    
+    MuonAll handles 1D parameters by converting them to diagonal matrices,
+    applying Newton-Schulz iteration, and converting back.
+    This removes the dependency on AdamW.
+    """
+    all_params = [p for p in model.parameters() if p.requires_grad]
+    
+    # Count params by type for logging
+    params_2d = sum(p.numel() for p in all_params if p.ndim == 2)
+    params_1d = sum(p.numel() for p in all_params if p.ndim == 1)
+    params_other = sum(p.numel() for p in all_params if p.ndim not in (1, 2))
+    
+    print(f"  MuonAll 2D parameters: {params_2d:,}")
+    print(f"  MuonAll 1D parameters: {params_1d:,}")
+    if params_other > 0:
+        print(f"  MuonAll other parameters: {params_other:,}")
+    
+    muonall_optimizer = MuonAll(
+        all_params, 
+        lr=config.muon_lr, 
+        momentum=config.muon_momentum
+    )
+    
+    return [muonall_optimizer]
 
 
 def train_model(
@@ -362,6 +391,14 @@ def train_model(
 
 
 
+def get_optimizer_setup_fn(config: BlueberryConfig):
+    """Return the appropriate optimizer setup function based on config."""
+    optimizer_type = getattr(config, 'optimizer', 'muon')
+    if optimizer_type == 'muonall':
+        return setup_muonall_optimizer
+    return setup_muon_optimizer
+
+
 def warmup_compiled_kernels(
     model: nn.Module,
     config: BlueberryConfig,
@@ -377,7 +414,8 @@ def warmup_compiled_kernels(
     model.train()
     
     # Temporary optimizer to warm up optimizer kernels too
-    temp_optimizers = setup_muon_optimizer(model, config)
+    optimizer_setup_fn = get_optimizer_setup_fn(config)
+    temp_optimizers = optimizer_setup_fn(model, config)
     
     warmup_iter = iter(train_loader)
     
@@ -497,7 +535,9 @@ def train_minimal_llm(
     # ============================================
     # 6. Create FRESH optimizers (no accumulated state)
     # ============================================
-    optimizers = setup_muon_optimizer(model, config)
+    optimizer_setup_fn = get_optimizer_setup_fn(config)
+    print(f"  Using optimizer: {getattr(config, 'optimizer', 'muon')}")
+    optimizers = optimizer_setup_fn(model, config)
 
     # ============================================
     # 7. Create FRESH schedulers

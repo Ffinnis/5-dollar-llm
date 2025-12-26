@@ -1,3 +1,3 @@
-from .muon import Muon
+from .muon import Muon, MuonAll
 
-__all__ = ['Muon']
+__all__ = ['Muon', 'MuonAll']

@@ -214,6 +214,7 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, help="Override gradient_accumulation_steps")
     parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
+    parser.add_argument("--optimizer", type=str, choices=["muon", "muonall"], help="Optimizer choice: muon (hybrid Muon+AdamW) or muonall (single optimizer for all params)")
 
     args = parser.parse_args()
 
@@ -252,6 +253,8 @@ def main():
         config.gradient_accumulation_steps = args.gradient_accumulation_steps
     if args.log_every is not None:
         config.log_every = args.log_every
+    if args.optimizer is not None:
+        config.optimizer = args.optimizer
     
     # Define custom milestones for validation curves and autosetup logging
     # For 8M benchmark (approx 488 steps)
