@@ -205,8 +205,10 @@ def train_model(
                 
                 # Training progress for Drop-Muon epoch-shift layer dropping
                 tokens_per_opt_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
-                total_opt_steps = config.train_tokens // tokens_per_opt_step
-                progress = min(1.0, step / max(1, total_opt_steps))
+                # `step` counts microbatches; Drop-Muon progress should track optimizer steps.
+                total_opt_steps = max(1, (config.train_tokens + tokens_per_opt_step - 1) // tokens_per_opt_step)
+                opt_step = (step + 1) // config.gradient_accumulation_steps  # 1-indexed
+                progress = min(1.0, (opt_step - 1) / max(1, total_opt_steps - 1))
                 
                 for optimizer in optimizers:
                     if isinstance(optimizer, Muon):
