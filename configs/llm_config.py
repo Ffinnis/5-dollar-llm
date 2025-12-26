@@ -38,6 +38,7 @@ class BlueberryConfig:
     
     # Optimizer choice: "muon" (hybrid Muon+AdamW) or "muonall" (single optimizer)
     optimizer: str = "muon"
+    muonall_lr_1d: float = 0.006  # Learning rate for 1D params in MuonAll (default = adamw_lr)
 
     # Evaluation
     eval_every: Optional[int] = None

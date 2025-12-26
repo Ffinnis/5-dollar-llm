@@ -76,8 +76,7 @@ def setup_muonall_optimizer(model: nn.Module, config: BlueberryConfig):
     """
     Setup MuonAll optimizer - single optimizer for ALL parameters.
     
-    MuonAll handles 1D parameters by converting them to diagonal matrices,
-    applying Newton-Schulz iteration, and converting back.
+    MuonAll uses Muon (Newton-Schulz) for 2D params and simple momentum for 1D params.
     This removes the dependency on AdamW.
     """
     all_params = [p for p in model.parameters() if p.requires_grad]
@@ -87,14 +86,16 @@ def setup_muonall_optimizer(model: nn.Module, config: BlueberryConfig):
     params_1d = sum(p.numel() for p in all_params if p.ndim == 1)
     params_other = sum(p.numel() for p in all_params if p.ndim not in (1, 2))
     
-    print(f"  MuonAll 2D parameters: {params_2d:,}")
-    print(f"  MuonAll 1D parameters: {params_1d:,}")
+    lr_1d = getattr(config, 'muonall_lr_1d', config.adamw_lr)
+    print(f"  MuonAll 2D parameters: {params_2d:,} (lr={config.muon_lr})")
+    print(f"  MuonAll 1D parameters: {params_1d:,} (lr_1d={lr_1d})")
     if params_other > 0:
         print(f"  MuonAll other parameters: {params_other:,}")
     
     muonall_optimizer = MuonAll(
         all_params, 
-        lr=config.muon_lr, 
+        lr=config.muon_lr,
+        lr_1d=lr_1d,
         momentum=config.muon_momentum
     )
     

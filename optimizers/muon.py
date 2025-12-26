@@ -73,13 +73,13 @@ class MuonAll(torch.optim.Optimizer):
     MuonAll - Modified Muon that handles ALL parameters including 1D.
     
     For 2D+ parameters: applies Muon (momentum + Newton-Schulz orthogonalization)
-    For 1D parameters: applies simple momentum update (no orthogonalization)
+    For 1D parameters: applies simple momentum update with separate lr_1d
     
     This removes the need for a separate AdamW optimizer while avoiding
     the overhead and instability of orthogonalizing 1D parameters.
     """
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+    def __init__(self, params, lr=0.02, lr_1d=0.006, momentum=0.95, nesterov=True, ns_steps=5):
+        defaults = dict(lr=lr, lr_1d=lr_1d, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -110,5 +110,5 @@ class MuonAll(torch.optim.Optimizer):
                     g = g.to(p.dtype)
                     p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
                 else:
-                    # Simple momentum update for 1D params
-                    p.add_(g, alpha=-group["lr"])
+                    # Simple momentum update for 1D params with separate learning rate
+                    p.add_(g, alpha=-group["lr_1d"])

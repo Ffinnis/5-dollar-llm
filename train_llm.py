@@ -215,6 +215,7 @@ def main():
     parser.add_argument("--log_every", type=int, default=100, help="Logging frequency in steps")
     parser.add_argument("--warmup", type=str, default="true", help="Whether to perform untimed compilation warmup (true/false)")
     parser.add_argument("--optimizer", type=str, choices=["muon", "muonall"], help="Optimizer choice: muon (hybrid Muon+AdamW) or muonall (single optimizer for all params)")
+    parser.add_argument("--muonall_lr_1d", type=float, help="Learning rate for 1D params in MuonAll")
 
     args = parser.parse_args()
 
@@ -255,8 +256,10 @@ def main():
         config.log_every = args.log_every
     if args.optimizer is not None:
         config.optimizer = args.optimizer
+    if args.muonall_lr_1d is not None:
+        config.muonall_lr_1d = args.muonall_lr_1d
     
-    # Define custom milestones for validation curves and autosetup logging
+    # Define custom milestones
     # For 8M benchmark (approx 488 steps)
     if config.train_tokens <= 8000000:
         config.eval_milestones = (0, 50, 100, 150, 200, 300, 400)
