@@ -70,6 +70,7 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
         lr=config.muon_lr, 
         momentum=config.muon_momentum,
         num_layers=config.n_layers,
+        alpha=config.muon_alpha,
     )
     adamw_optimizer = torch.optim.AdamW(
         adamw_params,
