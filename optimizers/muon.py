@@ -72,10 +72,11 @@ class MuonAll(torch.optim.Optimizer):
     """
     MuonAll - Modified Muon that handles ALL parameters including 1D.
     
-    For 1D parameters: converts to diagonal matrix, applies Newton-Schulz,
-    then converts back to 1D. This removes the need for a separate AdamW optimizer.
+    For 2D+ parameters: applies Muon (momentum + Newton-Schulz orthogonalization)
+    For 1D parameters: applies simple momentum update (no orthogonalization)
     
-    Reference: Algorithm 1 from MuonAll paper
+    This removes the need for a separate AdamW optimizer while avoiding
+    the overhead and instability of orthogonalizing 1D parameters.
     """
     def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
@@ -93,31 +94,21 @@ class MuonAll(torch.optim.Optimizer):
                 
                 # Check if parameter is 1D (bias, layer norm, etc.)
                 is_1d = (p.ndim == 1)
-                
-                # Step 4-6: If 1D, convert to diagonal matrix
-                if is_1d:
-                    g = torch.diag(g)
 
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
 
                 buf = state["momentum_buffer"]
-                # Step 7: B_t = momentum * B_{t-1} + G_t
                 buf.lerp_(g, 1 - group["momentum"])
                 
-                # Step 8: O_t = NewtonSchulz5(G_t + momentum * B_t)
-                # With Nesterov: g = G_t + momentum * B_t
+                # Apply Nesterov momentum
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                g = zeropower_polar_express(g, steps=group["ns_steps"])
-                g = g.to(p.dtype)
                 
-                # Step 9-11: If 1D, convert diagonal matrix back to 1D
-                if is_1d:
-                    g = torch.diag(g)
-                
-                # Step 12: Update parameters
-                # Scale by sqrt(fan_in / fan_out) for non-1D, or just lr for 1D
-                if is_1d:
-                    p.add_(g, alpha=-group["lr"])
-                else:
+                # Only apply Newton-Schulz orthogonalization to 2D+ parameters
+                if not is_1d:
+                    g = zeropower_polar_express(g, steps=group["ns_steps"])
+                    g = g.to(p.dtype)
                     p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+                else:
+                    # Simple momentum update for 1D params
+                    p.add_(g, alpha=-group["lr"])
