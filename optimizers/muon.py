@@ -42,16 +42,16 @@ class Muon(torch.optim.Optimizer):
     """
     DION2 - Sparse Muon with α-fraction row selection.
     
-    Algorithm (row-selection version):
-        1. M ← M + G                              (accumulate gradient into momentum)
-        2. K ← Select_α(M)                        (select α-fraction of rows by ℓ₁ norm)
-        3. O ← NewtonSchulz(M[K, :])              (orthonormalize only the submatrix)
-        4. M[K, :] ← μ · M[K, :]                  (in-place decay on selected rows)
+    Combines Muon's EMA momentum with DION2's sparse row selection:
+        1. Update momentum via EMA: buf ← μ·buf + (1-μ)·G
+        2. K ← Select_α(buf)                      (select α-fraction of rows by ℓ₁ norm)
+        3. Compute Nesterov: g ← (1-μ)·G + μ·buf
+        4. O ← NewtonSchulz(g[K, :])              (orthonormalize only the submatrix)
         5. W[K, :] ← W[K, :] - η√(fan-out/fan-in) · O  (sparse parameter update)
     """
     
-    def __init__(self, params, lr=0.02, momentum=0.95, alpha=0.25, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, alpha=alpha, ns_steps=ns_steps)
+    def __init__(self, params, lr=0.02, momentum=0.95, alpha=1.0, nesterov=True, ns_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, alpha=alpha, nesterov=nesterov, ns_steps=ns_steps)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -60,6 +60,7 @@ class Muon(torch.optim.Optimizer):
             lr = group["lr"]
             mu = group["momentum"]
             alpha = group["alpha"]
+            nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
 
             for p in group["params"]:
@@ -72,33 +73,32 @@ class Muon(torch.optim.Optimizer):
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
 
-                M = state["momentum_buffer"]
+                buf = state["momentum_buffer"]
+                
+                # EMA momentum update (same as original Muon)
+                buf.lerp_(g, 1 - mu)
+                
+                # Nesterov momentum
+                g = g.lerp_(buf, mu) if nesterov else buf
 
-                # Step 1: M ← M + G
-                M.add_(g)
-
-                if p.ndim == 2:
+                if p.ndim == 2 and alpha < 1.0:
                     num_rows = p.size(0)
                     k = max(1, int(alpha * num_rows))
 
-                    # Step 2: K ← Select_α(M) by ℓ₁ norm
-                    row_norms = M.abs().sum(dim=1)
+                    # Select α-fraction of rows by ℓ₁ norm
+                    row_norms = g.abs().sum(dim=1)
                     _, K = torch.topk(row_norms, k, largest=True, sorted=False)
 
-                    # Step 3: O ← NewtonSchulz(M[K, :])
-                    O = zeropower_polar_express(M[K, :], steps=ns_steps)
+                    # Orthonormalize only selected rows
+                    O = zeropower_polar_express(g[K, :], steps=ns_steps)
                     O = O.to(p.dtype)
 
-                    # Step 4: M[K, :] ← μ · M[K, :]
-                    M[K, :].mul_(mu)
-
-                    # Step 5: W[K, :] ← W[K, :] - η√(fan-out/fan-in) · O
+                    # Sparse parameter update
                     scale = max(1, p.size(0) / p.size(1)) ** 0.5
                     p[K, :].add_(O, alpha=-lr * scale)
                 else:
-                    # Fallback for non-2D
-                    O = zeropower_polar_express(M, steps=ns_steps)
+                    # Full update (original Muon behavior)
+                    O = zeropower_polar_express(g, steps=ns_steps)
                     O = O.to(p.dtype)
-                    M.mul_(mu)
                     scale = max(1, p.size(-2) / p.size(-1)) ** 0.5
                     p.add_(O.view_as(p), alpha=-lr * scale)
