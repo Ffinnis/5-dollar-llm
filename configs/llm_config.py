@@ -32,7 +32,7 @@ class BlueberryConfig:
     # Learning Rate (Aggressive for pre-training)
     muon_lr: float = 0.024
     muon_momentum: float = 0.95
-    muon_alpha: float = 0.25  # DION2: fraction of rows to update
+    muon_alpha: float = 1.0  # DION2: fraction of rows to update (1.0 = full Muon)
     adamw_lr: float = 0.006
     warmup_ratio: float = 0.0
     schedule_type: str = "constant"

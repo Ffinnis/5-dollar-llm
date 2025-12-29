@@ -93,7 +93,7 @@ class Muon(torch.optim.Optimizer):
                     M[K, :].mul_(mu)
 
                     # Step 5: W[K, :] ← W[K, :] - η√(fan-out/fan-in) · O
-                    scale = (p.size(0) / p.size(1)) ** 0.5
+                    scale = max(1, p.size(0) / p.size(1)) ** 0.5
                     p[K, :].add_(O, alpha=-lr * scale)
                 else:
                     # Fallback for non-2D
