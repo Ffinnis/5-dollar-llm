@@ -46,6 +46,7 @@ class BlueberryConfig:
     dropout: float = 0.0
     grad_clip: float = 1.0
     use_amp: bool = True
+    use_fp8: bool = False  # Use FP8 training via torchao (requires Ada/Hopper GPU)
     
     # Logging
     log_milestones: Tuple[int, ...] = (100, 500, 1000)

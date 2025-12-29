@@ -16,6 +16,7 @@ from models.llm import MinimalLLM
 from optimizers.muon import Muon
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
+from torchao.float8 import convert_to_float8_training
 
 
 class EarlyStopping:
@@ -102,7 +103,13 @@ def train_model(
         model, final_metrics, metrics_history
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device, dtype=torch.bfloat16)
+    
+    # FP8 or BF16 precision
+    if getattr(config, 'use_fp8', False):
+        model = model.to(device)  # FP8 keeps master weights in higher precision
+        model = convert_to_float8_training(model)
+    else:
+        model = model.to(device, dtype=torch.bfloat16)
     
     if schedulers is None:
         schedulers = []
@@ -161,7 +168,9 @@ def train_model(
             batch_tokens = x.numel()
 
             # Forward pass (optimized to avoid large contiguous copies of logits)
-            if config.use_amp:
+            # FP8 uses torchao's Float8Linear which handles precision internally
+            use_autocast = config.use_amp and not getattr(config, 'use_fp8', False)
+            if use_autocast:
                 with autocast('cuda', dtype=torch.bfloat16):
                     logits = model(x)
                     # Shift labels instead of logits to save ~3GB VRAM
@@ -177,6 +186,7 @@ def train_model(
                     loss = ce_loss / config.gradient_accumulation_steps
                 loss.backward()
             else:
+                # No autocast: either use_amp=False or use_fp8=True (FP8 handles precision internally)
                 logits = model(x)
                 shift_labels = torch.full_like(y, -100)
                 shift_labels[:, :-1] = y[:, 1:]
@@ -395,7 +405,9 @@ def warmup_compiled_kernels(
             x, y = batch[0].to(device), batch[-1].to(device)
         
         # Forward + Backward
-        if config.use_amp:
+        # FP8 uses torchao's Float8Linear which handles precision internally
+        use_autocast = config.use_amp and not getattr(config, 'use_fp8', False)
+        if use_autocast:
             with autocast('cuda', dtype=torch.bfloat16):
                 logits = model(x)
                 loss = F.cross_entropy(
