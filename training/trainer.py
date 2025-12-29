@@ -7,6 +7,10 @@ import time
 import json
 import json
 from pathlib import Path
+
+# Enable TF32 for faster float32 matmuls on Ampere+ GPUs
+torch.set_float32_matmul_precision('high')
+
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 from tqdm import tqdm
@@ -104,12 +108,10 @@ def train_model(
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # FP8 or BF16 precision
+    # Model precision: always use bf16 as base, optionally add FP8 for Linear layers
+    model = model.to(device, dtype=torch.bfloat16)
     if getattr(config, 'use_fp8', False):
-        model = model.to(device)  # FP8 keeps master weights in higher precision
-        model = convert_to_float8_training(model)
-    else:
-        model = model.to(device, dtype=torch.bfloat16)
+        model = convert_to_float8_training(model)  # Converts Linear layers to FP8
     
     if schedulers is None:
         schedulers = []
@@ -168,9 +170,7 @@ def train_model(
             batch_tokens = x.numel()
 
             # Forward pass (optimized to avoid large contiguous copies of logits)
-            # FP8 uses torchao's Float8Linear which handles precision internally
-            use_autocast = config.use_amp and not getattr(config, 'use_fp8', False)
-            if use_autocast:
+            if config.use_amp:
                 with autocast('cuda', dtype=torch.bfloat16):
                     logits = model(x)
                     # Shift labels instead of logits to save ~3GB VRAM
@@ -186,7 +186,6 @@ def train_model(
                     loss = ce_loss / config.gradient_accumulation_steps
                 loss.backward()
             else:
-                # No autocast: either use_amp=False or use_fp8=True (FP8 handles precision internally)
                 logits = model(x)
                 shift_labels = torch.full_like(y, -100)
                 shift_labels[:, :-1] = y[:, 1:]
@@ -405,9 +404,7 @@ def warmup_compiled_kernels(
             x, y = batch[0].to(device), batch[-1].to(device)
         
         # Forward + Backward
-        # FP8 uses torchao's Float8Linear which handles precision internally
-        use_autocast = config.use_amp and not getattr(config, 'use_fp8', False)
-        if use_autocast:
+        if config.use_amp:
             with autocast('cuda', dtype=torch.bfloat16):
                 logits = model(x)
                 loss = F.cross_entropy(
