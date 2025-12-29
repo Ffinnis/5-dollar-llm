@@ -90,15 +90,19 @@ class Muon(torch.optim.Optimizer):
                     _, K = torch.topk(row_norms, k, largest=True, sorted=False)
 
                     # Step 3: Orthonormalize only selected rows
-                    O = zeropower_polar_express(buf[K, :], steps=ns_steps)
+                    buf_selected = buf.index_select(0, K)
+                    O = zeropower_polar_express(buf_selected, steps=ns_steps)
                     O = O.to(p.dtype)
 
                     # Step 4: Decay ONLY selected rows (error feedback)
-                    buf[K, :].mul_(mu)
+                    # buf[K, :] *= mu
+                    buf.index_copy_(0, K, buf_selected * mu)
 
                     # Step 5: Sparse parameter update
+                    # p[K, :] -= lr * scale * O
                     scale = max(1, p.size(0) / p.size(1)) ** 0.5
-                    p[K, :].add_(O, alpha=-lr * scale)
+                    p_selected = p.index_select(0, K)
+                    p.index_copy_(0, K, p_selected - lr * scale * O)
                 else:
                     # Original Muon behavior (alpha=1.0 or non-2D)
                     buf.lerp_(g, 1 - mu)
