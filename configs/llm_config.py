@@ -35,6 +35,15 @@ class BlueberryConfig:
     adamw_lr: float = 0.006
     warmup_ratio: float = 0.0
     schedule_type: str = "constant"
+    
+    # Hypergradient LR Adaptation
+    # When enabled, LR is automatically tuned based on gradient-LR correlation
+    use_hypergradient: bool = False
+    hyper_lr: float = 1e-7           # meta learning rate for LR updates
+    lr_min: float = 1e-5             # minimum allowed learning rate
+    lr_max: float = 0.1              # maximum allowed learning rate
+    hg_warmup_steps: int = 50        # steps before enabling hypergradient
+    loss_window: int = 10            # loss history window for stability
 
     # Evaluation
     eval_every: Optional[int] = None

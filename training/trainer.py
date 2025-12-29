@@ -14,6 +14,7 @@ from typing import List, Optional, Callable, Dict, Any
 from configs.llm_config import BlueberryConfig
 from models.llm import MinimalLLM
 from optimizers.muon import Muon
+from optimizers.hypergradient import HypergradientWrapper, create_hypergradient_optimizers
 from training.evaluation import evaluate_model
 from utils.helpers import set_seed, format_time
 
@@ -44,8 +45,8 @@ class EarlyStopping:
 
 
 
-def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
-    """Setup Muon optimizer with hybrid approach"""
+def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig, use_hypergradient: bool = False):
+    """Setup Muon optimizer with hybrid approach, optionally with hypergradient wrapper"""
     muon_params = []
     adamw_params = []
 
@@ -69,7 +70,23 @@ def setup_muon_optimizer(model: nn.Module, config: BlueberryConfig):
         fused=torch.cuda.is_available()
     )
 
-    return [muon_optimizer, adamw_optimizer]
+    optimizers = [muon_optimizer, adamw_optimizer]
+    
+    # Optionally wrap with hypergradient adapter
+    if use_hypergradient and getattr(config, 'use_hypergradient', False):
+        print("  🎯 Hypergradient LR adaptation enabled")
+        wrapper = HypergradientWrapper(
+            optimizers=optimizers,
+            hyper_lr=getattr(config, 'hyper_lr', 1e-7),
+            lr_min=getattr(config, 'lr_min', 1e-5),
+            lr_max=getattr(config, 'lr_max', 0.1),
+            warmup_steps=getattr(config, 'hg_warmup_steps', 50),
+            loss_window=getattr(config, 'loss_window', 10),
+            adapt_muon_only=True,
+        )
+        return wrapper
+    
+    return optimizers
 
 
 def train_model(
@@ -77,7 +94,7 @@ def train_model(
     config: BlueberryConfig,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    optimizers: List[torch.optim.Optimizer],
+    optimizers,  # Can be List[Optimizer] or HypergradientWrapper
     schedulers: Optional[List] = None,
     early_stopper: Optional[EarlyStopping] = None,
     output_dir: Optional[str] = None,
@@ -108,6 +125,15 @@ def train_model(
         schedulers = []
 
     current_loss_val = 0.0
+    
+    # Check if we're using hypergradient wrapper
+    use_hg_wrapper = isinstance(optimizers, HypergradientWrapper)
+    if use_hg_wrapper:
+        hg_wrapper = optimizers
+        optimizer_list = hg_wrapper.optimizers
+    else:
+        hg_wrapper = None
+        optimizer_list = optimizers
 
     # Training metrics tracking
     # Synchronize CUDA to ensure accurate timing (no queued operations)
@@ -192,9 +218,17 @@ def train_model(
             # Optimizer step
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-                for optimizer in optimizers:
-                    optimizer.step()
-                    optimizer.zero_grad()
+                
+                if hg_wrapper is not None:
+                    # Use hypergradient wrapper - pass current loss for stability checks
+                    hg_wrapper.step(current_loss=ce_loss.item())
+                    hg_wrapper.zero_grad()
+                else:
+                    # Regular optimizer step
+                    for optimizer in optimizer_list:
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        
                 for scheduler in schedulers:
                     scheduler.step()
 
@@ -212,7 +246,12 @@ def train_model(
                     
                     # Use the scalar value we polled above
                     perplexity = math.exp(min(current_loss_val if 'current_loss_val' in locals() else ce_loss.item(), 20))
-                    current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
+                    if schedulers:
+                        current_lr = schedulers[0].get_last_lr()[0]
+                    elif hg_wrapper is not None:
+                        current_lr = hg_wrapper.get_current_lr(0)
+                    else:
+                        current_lr = optimizer_list[0].param_groups[0]['lr']
 
                 # Update progress bar
                 tokens_per_step = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
@@ -245,7 +284,12 @@ def train_model(
             if is_milestone:
                 eval_metrics = evaluate_model(model, val_loader, config)
                 elapsed_time = (time.time() - train_start_time) / 60
-                current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
+                if schedulers:
+                    current_lr = schedulers[0].get_last_lr()[0]
+                elif hg_wrapper is not None:
+                    current_lr = hg_wrapper.get_current_lr(0)
+                else:
+                    current_lr = optimizer_list[0].param_groups[0]['lr']
                 
                 # Track metrics
                 metrics_history['steps'].append(step)
@@ -284,7 +328,12 @@ def train_model(
         final_eval = evaluate_model(model, val_loader, config)
         final_eval['train_loss'] = current_loss_val
         elapsed_time = (time.time() - train_start_time) / 60
-        current_lr = schedulers[0].get_last_lr()[0] if schedulers else optimizers[0].param_groups[0]['lr']
+        if schedulers:
+            current_lr = schedulers[0].get_last_lr()[0]
+        elif hg_wrapper is not None:
+            current_lr = hg_wrapper.get_current_lr(0)
+        else:
+            current_lr = optimizer_list[0].param_groups[0]['lr']
         
         metrics_history['steps'].append(step)
         metrics_history['val_losses'].append(final_eval['val_loss'])
@@ -350,7 +399,8 @@ def train_model(
         }, checkpoint_path)
         print(f"   💾 Model saved to {checkpoint_path}")
     
-    return {
+    # Include hypergradient LR history if available
+    result = {
         'model': model,
         'final_metrics': final_eval,
         'metrics_history': metrics_history,
@@ -359,6 +409,12 @@ def train_model(
         'tokens_seen': tokens_seen,
         'train_loss': current_loss_val if 'current_loss_val' in locals() else 0.0,
     }
+    
+    if hg_wrapper is not None:
+        result['hg_lr_history'] = hg_wrapper.get_lr_history()
+        result['hg_stats'] = hg_wrapper.get_stats()
+    
+    return result
 
 
 
@@ -497,36 +553,40 @@ def train_minimal_llm(
     # ============================================
     # 6. Create FRESH optimizers (no accumulated state)
     # ============================================
-    optimizers = setup_muon_optimizer(model, config)
+    use_hg = getattr(config, 'use_hypergradient', False)
+    optimizers = setup_muon_optimizer(model, config, use_hypergradient=use_hg)
 
     # ============================================
-    # 7. Create FRESH schedulers
+    # 7. Create FRESH schedulers (disabled when using hypergradient)
     # ============================================
-    # Tokens per optimization step
-    tokens_per_opt = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
-    total_steps = config.train_tokens // tokens_per_opt
-    warmup_steps = max(1, int(total_steps * config.warmup_ratio))
-    schedule_type = getattr(config, 'schedule_type', 'cosine')
-    
+    # When using hypergradient, LR is adapted dynamically, so we skip schedulers
     schedulers = []
-    for optimizer in optimizers:
-        if schedule_type == 'cosine':
-            def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
-                if current_step < warmup:
-                    return current_step / warmup
-                progress = (current_step - warmup) / max(1, total - warmup)
-                return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
-        elif schedule_type == 'linear':
-            def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
-                if current_step < warmup:
-                    return current_step / warmup
-                progress = (current_step - warmup) / max(1, total - warmup)
-                return max(0.1, 1.0 - progress)
-        else:  # constant
-            def lr_lambda(current_step, warmup=warmup_steps):
-                return current_step / warmup if current_step < warmup else 1.0
+    
+    if not use_hg:
+        # Tokens per optimization step
+        tokens_per_opt = config.batch_size * config.max_seq_len * config.gradient_accumulation_steps
+        total_steps = config.train_tokens // tokens_per_opt
+        warmup_steps = max(1, int(total_steps * config.warmup_ratio))
+        schedule_type = getattr(config, 'schedule_type', 'cosine')
         
-        schedulers.append(torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda))
+        for optimizer in optimizers:
+            if schedule_type == 'cosine':
+                def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
+                    if current_step < warmup:
+                        return current_step / warmup
+                    progress = (current_step - warmup) / max(1, total - warmup)
+                    return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+            elif schedule_type == 'linear':
+                def lr_lambda(current_step, warmup=warmup_steps, total=total_steps):
+                    if current_step < warmup:
+                        return current_step / warmup
+                    progress = (current_step - warmup) / max(1, total - warmup)
+                    return max(0.1, 1.0 - progress)
+            else:  # constant
+                def lr_lambda(current_step, warmup=warmup_steps):
+                    return current_step / warmup if current_step < warmup else 1.0
+            
+            schedulers.append(torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda))
 
     # ============================================
     # 8. Reset RNG for reproducible training
@@ -591,6 +651,13 @@ def train_minimal_llm(
         'train_tokens': config.train_tokens,
         'history': metrics_history,
     }
+    
+    # Include hypergradient LR history if available
+    if 'hg_lr_history' in results:
+        metrics_data['hg_lr_history'] = results['hg_lr_history']
+        metrics_data['hg_stats'] = results.get('hg_stats', {})
+        metrics_data['use_hypergradient'] = True
+        
     with open(metrics_file, 'w') as f:
         json.dump(metrics_data, f, indent=2)
     print(f"   📊 Metrics saved to {metrics_file}")
