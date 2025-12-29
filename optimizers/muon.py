@@ -82,27 +82,39 @@ class Muon(torch.optim.Optimizer):
                     # Step 1: Accumulate gradient (no decay yet)
                     buf.add_(g)
                     
-                    num_rows = p.size(0)
-                    k = max(1, int(alpha * num_rows))
-
-                    # Step 2: Select α-fraction of rows by ℓ₁ norm
-                    row_norms = buf.abs().sum(dim=1)
-                    _, K = torch.topk(row_norms, k, largest=True, sorted=False)
-
-                    # Step 3: Orthonormalize only selected rows
-                    buf_selected = buf.index_select(0, K)
-                    O = zeropower_polar_express(buf_selected, steps=ns_steps)
-                    O = O.to(p.dtype)
-
-                    # Step 4: Decay ONLY selected rows (error feedback)
-                    # buf[K, :] *= mu
-                    buf.index_copy_(0, K, buf_selected * mu)
-
-                    # Step 5: Sparse parameter update
-                    # p[K, :] -= lr * scale * O
-                    scale = max(1, p.size(0) / p.size(1)) ** 0.5
-                    p_selected = p.index_select(0, K)
-                    p.index_copy_(0, K, p_selected - lr * scale * O)
+                    rows, cols = p.size(0), p.size(1)
+                    
+                    # Select along SHORTER dimension (as per DION2 paper)
+                    if rows <= cols:
+                        # Row selection
+                        k = max(1, int(alpha * rows))
+                        norms = buf.abs().sum(dim=1)
+                        _, K = torch.topk(norms, k, largest=True, sorted=False)
+                        
+                        buf_selected = buf.index_select(0, K)
+                        O = zeropower_polar_express(buf_selected, steps=ns_steps)
+                        O = O.to(p.dtype)
+                        
+                        buf.index_copy_(0, K, buf_selected * mu)
+                        
+                        scale = max(1, rows / cols) ** 0.5
+                        p_selected = p.index_select(0, K)
+                        p.index_copy_(0, K, p_selected - lr * scale * O)
+                    else:
+                        # Column selection
+                        k = max(1, int(alpha * cols))
+                        norms = buf.abs().sum(dim=0)
+                        _, K = torch.topk(norms, k, largest=True, sorted=False)
+                        
+                        buf_selected = buf.index_select(1, K)
+                        O = zeropower_polar_express(buf_selected, steps=ns_steps)
+                        O = O.to(p.dtype)
+                        
+                        buf.index_copy_(1, K, buf_selected * mu)
+                        
+                        scale = max(1, rows / cols) ** 0.5
+                        p_selected = p.index_select(1, K)
+                        p.index_copy_(1, K, p_selected - lr * scale * O)
                 else:
                     # Original Muon behavior (alpha=1.0 or non-2D)
                     buf.lerp_(g, 1 - mu)
